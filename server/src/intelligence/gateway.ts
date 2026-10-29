@@ -50,11 +50,15 @@ export class IntelligenceGateway {
   /** Build the socket state for a fresh upgrade, from its connect params. */
   socketData(plane: PhoenixData["phoenix"], request: Request): PhoenixData {
     const url = new URL(request.url);
+    // Phoenix's transport appends `/websocket` to the connect URL, and a query
+    // param written before it can carry the suffix into its value.
+    const clean = (value: string | null) =>
+      value ? value.replace(/\/websocket$/, "") : undefined;
     return {
       phoenix: plane,
       joined: new Map(),
-      joinToken: url.searchParams.get("join_token") ?? undefined,
-      token: url.searchParams.get("token") ?? undefined,
+      joinToken: clean(url.searchParams.get("join_token")),
+      token: clean(url.searchParams.get("token")),
     };
   }
 
@@ -141,6 +145,10 @@ export class IntelligenceGateway {
     params: Record<string, unknown>,
   ): Promise<void> {
     const data = ws.data as SocketData;
+    if (process.env.INTELLIGENCE_GATEWAY_DEBUG)
+      console.log(
+        `[gateway] join ${topic} plane=${data.phoenix} token=${data.joinToken ?? "none"}`,
+      );
     // Authorize: runner joins need no per-thread token (the socket's bearer
     // key is the deployment's); client joins carry the minted join token, put
     // on the socket URL by the Phoenix client's connect params.
