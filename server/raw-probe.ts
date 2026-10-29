@@ -1,0 +1,11 @@
+const REST = "http://localhost:3101/api/intelligence";
+const KEY = "local-intelligence";
+const THREAD = `raw-${Date.now()}`;
+const create = await fetch(`${REST}/api/threads`, { method: "POST", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" }, body: JSON.stringify({ threadId: THREAD, userId: "u-raw", agentId: "general-assistant" }) });
+await create.json();
+const jc = await (await fetch(`${REST}/api/threads/${THREAD}/join-code`, { headers: { authorization: `Bearer ${KEY}` } })).json() as any;
+const ws = new WebSocket(`ws://localhost:3101/api/intelligence-gateway/client?join_token=${jc.joinToken}&vsn=2.0.0`);
+ws.onopen = () => { console.log("open"); ws.send(JSON.stringify(["1", "1", `thread:${THREAD}`, "phx_join", {}])); };
+ws.onmessage = (e) => console.log("frame:", String(e.data).slice(0, 300));
+ws.onclose = (e) => console.log("close:", e.code, e.reason);
+setTimeout(() => process.exit(0), 4000);

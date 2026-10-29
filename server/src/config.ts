@@ -999,26 +999,21 @@ function oktaAuth(
  * deployment sets one, which is what a self-hosted Intelligence with its own licence needs.
  */
 function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
+  // The local Intelligence platform: REST and Phoenix gateway mounted on this very
+  // server (server/src/intelligence). A deployment overrides the addresses to point
+  // at a self-hosted CopilotKit Intelligence; unset, OpenBot serves its own.
+  const port = Number(environment.PORT ?? 3001);
   const settings = {
-    apiUrl: url(environment, "INTELLIGENCE_API_URL"),
-    gatewayWsUrl: url(environment, "INTELLIGENCE_GATEWAY_WS_URL"),
-    apiKey: intelligenceApiKey(environment),
+    apiUrl:
+      url(environment, "INTELLIGENCE_API_URL") ??
+      `http://localhost:${port}/api/intelligence`,
+    gatewayWsUrl:
+      url(environment, "INTELLIGENCE_GATEWAY_WS_URL") ??
+      `ws://localhost:${port}/api/intelligence-gateway`,
+    apiKey:
+      intelligenceApiKey(environment) ?? "local-intelligence",
     licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
   };
-
-  const missing = Object.entries({
-    INTELLIGENCE_API_URL: settings.apiUrl,
-    INTELLIGENCE_GATEWAY_WS_URL: settings.gatewayWsUrl,
-    "CPK_INTELLIGENCE_API_KEY (or INTELLIGENCE_API_KEY)": settings.apiKey,
-  })
-    .filter(([, value]) => !value)
-    .map(([name]) => name);
-
-  if (missing.length > 0) {
-    throw new Error(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${missing.join(", ")}`,
-    );
-  }
 
   /*
    * Optional, and only ever a second address for the same gateway. The browser opens the gateway

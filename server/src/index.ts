@@ -170,6 +170,7 @@ import {
 } from "./host-access/broker";
 import { hostAccessTools } from "./host-access/tools";
 import { startHttpServer } from "./http-server";
+import { createLocalIntelligence } from "./intelligence";
 import { githubCallbackRoutes } from "./identity/github-callback";
 import { retireIdentityLinks, retireOwnedAccounts } from "./identity/retire";
 import { slackCodeRedeemer } from "./identity/slack-redeem";
@@ -2780,12 +2781,18 @@ const app = createApp(
   profileStore,
 );
 
+const localIntelligence = createLocalIntelligence({
+  database,
+  apiKey: config.runtime.intelligence.apiKey,
+});
+
 startHttpServer({
   port,
   config,
   resolveRequestActor,
   agentProfileStore,
   computerGateway,
+  intelligence: localIntelligence,
   app,
 });
 

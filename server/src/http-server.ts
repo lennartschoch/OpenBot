@@ -6,6 +6,7 @@ import type { OpenBotRole } from "./auth/roles";
 import { botBrowserRequestSeconds } from "./browser/bot-browser";
 import { browserRequestSeconds } from "./browser/routes";
 import { websocket as channelSocket } from "./channels/socket";
+import type { PhoenixData } from "./intelligence/gateway";
 import type { ComputerGateway } from "./computer/gateway";
 import { streamPathBotId } from "./computer/stream-path";
 import type { DeploymentConfig } from "./config";
@@ -30,7 +31,21 @@ type StreamData = {
  * not, rather than either feature quietly taking the slot and breaking the other on connect.
  */
 type ChannelSocket = Parameters<typeof channelSocket.open>[0];
-type SocketData = StreamData | ChannelSocket["data"];
+type SocketData = StreamData | ChannelSocket["data"] | PhoenixData;
+
+const isPhoenix = (data: SocketData): data is PhoenixData =>
+  typeof (data as PhoenixData).phoenix === "string";
+
+/**
+ * The slice of a Bun server websocket the Phoenix gateway needs, and the data
+ * an upgraded socket carries. Built by the gateway itself so the plane, the
+ * channel registry and the connect params all agree.
+ */
+export type GatewaySocketLike = {
+  data: PhoenixData;
+  send: (data: string | ArrayBufferView) => void;
+  close: (code?: number, reason?: string) => void;
+};
 
 export function startHttpServer(deps: {
   port: number;
@@ -40,6 +55,18 @@ export function startHttpServer(deps: {
   ) => Promise<{ id: string; name: string; role: OpenBotRole }>;
   agentProfileStore: AgentProfileStore;
   computerGateway: ComputerGateway | undefined;
+  /** The in-repo Intelligence platform: REST routes and the Phoenix gateway. */
+  intelligence?: {
+    rest: { fetch: (request: Request) => Response | Promise<Response> };
+    gateway: {
+      socketData: (
+        plane: PhoenixData["phoenix"],
+        request: Request,
+      ) => PhoenixData;
+      handle: (ws: GatewaySocketLike, raw: string | Buffer) => void;
+      handleClose: (ws: GatewaySocketLike) => void;
+    };
+  };
   app: {
     fetch: (
       request: Request,
@@ -53,6 +80,7 @@ export function startHttpServer(deps: {
     resolveRequestActor,
     agentProfileStore,
     computerGateway,
+    intelligence,
     app,
   } = deps;
 
@@ -90,6 +118,31 @@ export function startHttpServer(deps: {
     port,
     async fetch(request, server) {
       const url = new URL(request.url);
+      // The local Intelligence platform: REST under its base, the three Phoenix
+      // planes on the gateway base plus /runner, /client, /channels.
+      if (intelligence) {
+        if (url.pathname.startsWith("/api/intelligence/")) {
+          // The routes are mounted on their own base: strip it so the platform
+          // client's `/api/threads` and friends land on the route they declare.
+          return intelligence.rest.fetch(
+            new Request(
+              `${url.origin}${url.pathname.slice("/api/intelligence".length)}${url.search}`,
+              request,
+            ),
+          );
+        }
+        const plane = intelligencePlaneOf(url.pathname);
+        if (plane && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          if (
+            server.upgrade(request, {
+              data: intelligence.gateway.socketData(plane, request),
+            })
+          ) {
+            return undefined as unknown as Response;
+          }
+          return new Response("Expected a WebSocket upgrade.", { status: 400 });
+        }
+      }
       if (url.pathname === "/api/audio/transcriptions") {
         server.timeout(request, DICTATION_HTTP_IDLE_SECONDS);
       }
@@ -172,6 +225,9 @@ export function startHttpServer(deps: {
     },
     websocket: {
       open(ws) {
+        if (isPhoenix(ws.data)) {
+          return;
+        }
         if (!isProxiedStream(ws.data)) {
           channelSocket.open(asChannelSocket(ws));
           return;
@@ -192,6 +248,10 @@ export function startHttpServer(deps: {
         inward.onerror = () => ws.close();
       },
       message(ws, raw) {
+        if (isPhoenix(ws.data)) {
+          intelligence?.gateway.handle(ws as unknown as GatewaySocketLike, raw);
+          return;
+        }
         if (!isProxiedStream(ws.data)) {
           channelSocket.message(asChannelSocket(ws), raw);
           return;
@@ -199,6 +259,10 @@ export function startHttpServer(deps: {
         if (ws.data.inward?.readyState === 1) ws.data.inward.send(String(raw));
       },
       close(ws, code, reason) {
+        if (isPhoenix(ws.data)) {
+          intelligence?.gateway.handleClose(ws as unknown as GatewaySocketLike);
+          return;
+        }
         if (!isProxiedStream(ws.data)) {
           channelSocket.close(asChannelSocket(ws), code, reason);
           return;
@@ -207,4 +271,16 @@ export function startHttpServer(deps: {
       },
     },
   });
+}
+
+/** The three Phoenix planes, by path suffix of the gateway's base. */
+function intelligencePlaneOf(
+  pathname: string,
+): "runner" | "client" | "channels" | null {
+  const base = "/api/intelligence-gateway";
+  if (!pathname.startsWith(base)) return null;
+  const rest = pathname.slice(base.length);
+  return rest === "/runner" || rest === "/client" || rest === "/channels"
+    ? (rest.slice(1) as "runner" | "client" | "channels")
+    : null;
 }
