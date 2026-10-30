@@ -699,3 +699,101 @@ describe("platform authentication and thread ownership", () => {
     })).status).toBe(200);
   });
 });
+
+describe("the hosted lock and thread lifecycle contract", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  async function threadFor(userId = "u1") {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+    });
+    return threadId;
+  }
+
+  test("the lock lifetime is the platform's 120 seconds", async () => {
+    const threadId = await threadFor();
+    const runId = `run-${unique()}`;
+    for (const ttlSeconds of [5, 3600]) {
+      await call(app, `/api/threads/${threadId}/lock`, {
+        method: "DELETE",
+        body: JSON.stringify({ runId }),
+      });
+      const acquired = await call(app, `/api/threads/${threadId}/lock`, {
+        method: "POST",
+        body: JSON.stringify({ runId, userId: "u1", agentId: "a1", ttlSeconds }),
+      });
+      expect(acquired.status).toBe(200);
+      expect(acquired.body.ttlSeconds).toBe(120);
+    }
+    const renewed = await call(app, `/api/threads/${threadId}/lock`, {
+      method: "PATCH",
+      body: JSON.stringify({ runId, ttlSeconds: 1 }),
+    });
+    expect(renewed.body).toEqual({ ttlSeconds: 120, status: "renewed" });
+  });
+
+  test("renewing a lock another run holds is a 409, not a finish", async () => {
+    const threadId = await threadFor();
+    const runId = `run-${unique()}`;
+    await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId, userId: "u1", agentId: "a1" }),
+    });
+    const wrong = await call(app, `/api/threads/${threadId}/lock`, {
+      method: "PATCH",
+      body: JSON.stringify({ runId: "another-run", ttlSeconds: 120 }),
+    });
+    expect(wrong.status).toBe(409);
+    expect(wrong.body.error.code).toBe("THREAD_LOCK_RENEWAL_FAILED");
+    expect(wrong.body.error.retryable).toBe(false);
+
+    // Once the run releases it, the same renewal reports completion.
+    await call(app, `/api/threads/${threadId}/lock`, {
+      method: "DELETE",
+      body: JSON.stringify({ runId }),
+    });
+    const completed = await call(app, `/api/threads/${threadId}/lock`, {
+      method: "PATCH",
+      body: JSON.stringify({ runId, ttlSeconds: 120 }),
+    });
+    expect(completed.body).toEqual({ ttlSeconds: 0, status: "completed" });
+  });
+
+  test("connect and lock create the thread for the caller on first use", async () => {
+    const threadId = unique();
+    const idle = await call(app, `/api/threads/${threadId}/connect`, {
+      method: "POST",
+      body: JSON.stringify({ userId: "u1", agentId: "a1" }),
+    });
+    expect(idle.status).toBe(200);
+    expect(typeof idle.body.joinToken).toBe("string");
+    expect(idle.body.runId).toBeUndefined();
+    expect((await call(app, `/api/threads/${threadId}?userId=u1`)).status).toBe(200);
+
+    const other = unique();
+    const runId = `run-${unique()}`;
+    const locked = await call(app, `/api/threads/${other}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId, userId: "u1", agentId: "a1" }),
+    });
+    expect(locked.status).toBe(200);
+    expect((await call(app, `/api/threads/${other}?userId=u1`)).status).toBe(200);
+    const connect = await call(app, `/api/threads/${other}/connect`, {
+      method: "POST",
+      body: JSON.stringify({ userId: "u1", agentId: "a1" }),
+    });
+    expect(connect.body.runId).toBe(runId);
+  });
+
+  test("deleting an absent thread is a 404", async () => {
+    const threadId = unique();
+    const first = await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId: "u1", agentId: "a1" }),
+    });
+    expect(first.status).toBe(404);
+  });
+});
