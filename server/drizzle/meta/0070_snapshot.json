@@ -1,5 +1,5 @@
 {
-  "id": "d3c18509-f218-4624-97d2-e8072601ab33",
+  "id": "a31d81cd-5088-42fb-8948-93b7a77b0614",
   "prevId": "ab8a3370-f719-40eb-9066-b19d682c8e6a",
   "version": "7",
   "dialect": "postgresql",
@@ -10336,6 +10336,91 @@
       },
       "isRLSEnabled": false
     },
+    "public.intelligence_channel_files": {
+      "name": "intelligence_channel_files",
+      "schema": "",
+      "columns": {
+        "handle": {
+          "name": "handle",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "delivery_id": {
+          "name": "delivery_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_id": {
+          "name": "operation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "alt_text": {
+          "name": "alt_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "bytes": {
+          "name": "bytes",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "intelligence_channel_files_delivery_idx": {
+          "name": "intelligence_channel_files_delivery_idx",
+          "columns": [
+            {
+              "expression": "delivery_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.intelligence_join_tokens": {
       "name": "intelligence_join_tokens",
       "schema": "",
@@ -10364,6 +10449,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
@@ -10377,6 +10468,21 @@
           "columns": [
             {
               "expression": "thread_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "intelligence_join_tokens_expires_idx": {
+          "name": "intelligence_join_tokens_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -10411,8 +10517,28 @@
           "primaryKey": false,
           "notNull": true
         },
+        "project_id": {
+          "name": "project_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "prompt_context": {
+          "name": "prompt_context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -10665,6 +10791,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "intelligence_thread_events_cpki_idx": {
+          "name": "intelligence_thread_events_cpki_idx",
+          "columns": [
+            {
+              "expression": "((\"event\" -> 'metadata') ->> 'cpki_event_id')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -10811,6 +10952,54 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.intelligence_user_join_codes": {
+      "name": "intelligence_user_join_codes",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "intelligence_user_join_codes_code_idx": {
+          "name": "intelligence_user_join_codes_code_idx",
+          "columns": [
+            {
+              "expression": "code",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}

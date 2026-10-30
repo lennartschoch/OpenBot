@@ -86,7 +86,7 @@ stable, so the thread-list channel has an address that does not change on every 
 
 ## Storage
 
-Nine tables, created by migrations `0070`–`0073`:
+Nine tables, created by `0070_local_intelligence`:
 
 - `intelligence_threads` — the summary fields and the folded transcript. The event log is the source;
   `GET …/messages` is one row read because the fold happens at append time.

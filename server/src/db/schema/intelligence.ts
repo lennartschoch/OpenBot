@@ -112,7 +112,14 @@ export const intelligenceJoinTokens = pgTable(
     code: text("code"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  (table) => [index("intelligence_join_tokens_thread_idx").on(table.threadId)],
+  (table) => [
+    index("intelligence_join_tokens_thread_idx").on(table.threadId),
+    /*
+     * Every mint prunes the expired rows, so this is a delete on the table's least
+     * selective column and the one query that runs on every connect.
+     */
+    index("intelligence_join_tokens_expires_idx").on(table.expiresAt),
+  ],
 );
 
 /** One stable join code per person, the topic suffix of their meta channels. */

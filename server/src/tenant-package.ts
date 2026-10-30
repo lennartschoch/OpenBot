@@ -516,6 +516,33 @@ function collectAgents(
   return agents;
 }
 
+/**
+ * `model.reasoning_effort`, passed through as written like `default_model`, but shaped.
+ *
+ * The values are the provider's — `low`, `medium`, `high`, `none`, `xhigh`, and whatever
+ * an OpenAI-compatible endpoint adds — so there is no list to check against. What is
+ * checkable is the shape: one lowercase word, no spaces. A typo that reached the
+ * provider would fail the first turn of every built-in Bot with an argument error
+ * instead of at boot, which is the wrong place to learn about it.
+ */
+function reasoningEffort(value: unknown): { reasoningEffort?: string } {
+  if (value === undefined || value === null) return {};
+  const effort = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (effort === "") {
+    // An empty string is a deployment saying "nothing", the way an empty
+    // OPENBOT_LEARNING_AUTO_ASSIGN is. Anything else that is not a word is a typo.
+    if (typeof value === "string") return {};
+    throw new TypeError(
+      `model.reasoning_effort must be one lowercase word such as low, medium or high, and is ${JSON.stringify(value)}`,
+    );
+  }
+  if (!/^[a-z][a-z0-9-]{0,15}$/.test(effort))
+    throw new TypeError(
+      `model.reasoning_effort must be one lowercase word such as low, medium or high, and is ${JSON.stringify(value)}`,
+    );
+  return { reasoningEffort: effort };
+}
+
 export function validateTenantPackage(files: PackageFiles): TenantPackage {
   if (files.themeCss.trim()) {
     validateThemeCss(files.themeCss);
@@ -646,10 +673,7 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
         "model.credential_secret_ref",
       ),
       defaultModel: requiredString(model.default_model, "model.default_model"),
-      ...(typeof model.reasoning_effort === "string" &&
-      model.reasoning_effort.trim()
-        ? { reasoningEffort: model.reasoning_effort.trim() }
-        : {}),
+      ...reasoningEffort(model.reasoning_effort),
     },
     knowledgeSources: sources,
     skills: packageSkills,
@@ -1128,7 +1152,6 @@ export async function synchronizeTenantPackage(
     return deploymentPackage;
   });
 }
-
 export function createPackageStatusReader(
   database: Database,
 ): PackageStatusReader {

@@ -78,9 +78,8 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
   `COMPUTER_MEMORY_HIGH_PERCENT=0` and `COMPUTER_TAB_IDLE_MS=0` (Helm: `computers.memoryHighPercent`
   and `computers.tabIdleMs`) keep the old behaviour.
 - The Intelligence platform now runs inside the server, on the Postgres OpenBot already uses:
-  threads, event history, memories, Learning containers and the realtime gateway, in migrations
-  `0070_local_intelligence` to `0073_intelligence_user_join_codes` (nine tables; nothing existing
-  changes). A deployment that names `INTELLIGENCE_API_URL` and `INTELLIGENCE_GATEWAY_WS_URL` keeps
+  threads, event history, memories, Learning containers and the realtime gateway, in migration
+  `0070_local_intelligence` (nine tables; nothing existing changes). A deployment that names `INTELLIGENCE_API_URL` and `INTELLIGENCE_GATEWAY_WS_URL` keeps
   using what it named, so managed and self-hosted Intelligence work as before; unset, the defaults
   point at the server itself and need no account. `CPK_INTELLIGENCE_API_KEY` no longer has a missing
   case: on a deployment with a sign-in provider, the placeholder `.env.example` ships now **stops

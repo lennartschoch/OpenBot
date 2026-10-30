@@ -205,6 +205,51 @@ describe("tenant theme validation", () => {
   });
 });
 
+describe("model.reasoning_effort", () => {
+  const withEffort = (effort: string) =>
+    validateTenantPackage({
+      brand: "tenant: { id: fintech, product_name: Ledgerline }",
+      agents: "agents: []",
+      channels: "channels: []",
+      model: `model: { provider: openai, credential_secret_ref: openai-key, default_model: gpt-5.6-terra, reasoning_effort: ${effort} }`,
+      knowledge: "sources: []",
+      themeCss: "",
+    });
+
+  test("is passed through, trimmed and lowercased, because the provider decides the values", () => {
+    // No list to check against: an OpenAI-compatible endpoint publishes its own, so the
+    // shape is what is validated and the value travels as written.
+    expect(withEffort('"low"').model.reasoningEffort).toBe("low");
+    expect(withEffort('"  XHIGH  "').model.reasoningEffort).toBe("xhigh");
+    expect(withEffort('"medium"').model.reasoningEffort).toBe("medium");
+    expect(withEffort('""').model.reasoningEffort).toBeUndefined();
+  });
+
+  test("unset is unset, so the provider's own default stands", () => {
+    const config = validateTenantPackage({
+      brand: "tenant: { id: fintech, product_name: Ledgerline }",
+      agents: "agents: []",
+      channels: "channels: []",
+      model:
+        "model: { provider: openai, credential_secret_ref: openai-key, default_model: gpt-5.6-terra }",
+      knowledge: "sources: []",
+      themeCss: "",
+    });
+    expect(config.model.reasoningEffort).toBeUndefined();
+  });
+
+  // A value the provider would reject fails every turn of every built-in Bot at the
+  // model call, which is a long way from the file that had the typo.
+  test.each(['"extra high"', '"low!"', "1", '"0x10"'])(
+    "refuses %s at load rather than at the first turn",
+    (effort) => {
+      expect(() => withEffort(effort)).toThrow(
+        /model\.reasoning_effort must be one lowercase word/,
+      );
+    },
+  );
+});
+
 describe("a seeded Mastra Bot", () => {
   const withAgent = (agent: string) =>
     validateTenantPackage({
