@@ -164,8 +164,10 @@ Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you 
 **Reaching it from another machine.** The default Intelligence addresses are the server's own
 `localhost`, which is right when the browser runs on the same machine as the server and wrong the
 moment it does not. The symptom is quiet rather than loud: the page loads, a message sends, and no
-reply ever streams. The browser is told where the realtime gateway is in `/info`, so name the address
-the browser can reach:
+reply ever streams. Naming the deployment's own address as `OPENBOT_PUBLIC_URL` is enough — the
+browser is told where the realtime gateway is in `/info`, and the server derives that address from
+it. Name it yourself when there is no public URL to derive from, or when the browser reaches the
+server somewhere else:
 
 ```sh
 INTELLIGENCE_GATEWAY_WS_URL=wss://openbot.example.com/api/intelligence-gateway

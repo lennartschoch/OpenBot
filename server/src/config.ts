@@ -1018,6 +1018,81 @@ function assertPlatformKeyNotPlaceholder(
 }
 
 /**
+ * The gateway address a browser can reach, when this deployment serves the platform itself.
+ *
+ * `/info` hands the browser `browserGatewayWsUrl ?? gatewayWsUrl`, and both of this deployment's
+ * defaults are `ws://localhost:<port>/…` — correct for a browser on the same machine, and a silent
+ * dead stream for one that is not (the page loads, the message sends, no reply arrives). A
+ * deployment that named its own public address has already told us the host to use, so this answers
+ * with the same gateway path on that host.
+ *
+ * Only when the configured gateway is loopback, which is how "nobody chose anything" is spelled
+ * here: a deployment pointing `INTELLIGENCE_GATEWAY_WS_URL` at a self-hosted Intelligence on another
+ * machine picks its own host, and one that is genuinely behind a reverse proxy in front of a
+ * loopback server names `INTELLIGENCE_BROWSER_GATEWAY_WS_URL` and wins over this. A subpath proxy
+ * wants that variable too: the derived address keeps the gateway's own path and no prefix of the
+ * public URL's.
+ */
+function browserGatewayForPublicOrigin(
+  environment: Environment,
+  gatewayWsUrl: string,
+): string | undefined {
+  let gateway: URL;
+  try {
+    gateway = new URL(gatewayWsUrl);
+  } catch {
+    return undefined;
+  }
+  if (!isLoopbackHostname(gateway.hostname)) return undefined;
+  // Nothing to carry: a gateway URL with no path is not this platform's, and inventing one here
+  // would move the problem rather than solve it.
+  if (gateway.pathname === "/" || gateway.pathname === "") return undefined;
+  /*
+   * Only the two settings that mean "this deployment's public address", and not the sign-in base
+   * URL: a laptop's `.env` often names a different port there (the app's dev server), and deriving
+   * from it would move the browser's socket off the server.
+   */
+  const publicOrigin = [
+    optional(environment, "OPENBOT_PUBLIC_URL"),
+    optional(environment, "OPENBOT_APP_URL"),
+  ]
+    .map((value) => value?.trim())
+    .find((value): value is string => Boolean(value));
+  if (!publicOrigin) return undefined;
+  let origin: URL;
+  try {
+    origin = new URL(publicOrigin);
+  } catch {
+    // An address this broken is refused by the setting that owns it, not by this one.
+    return undefined;
+  }
+  if (origin.protocol !== "https:" && origin.protocol !== "http:") {
+    return undefined;
+  }
+  // The page is served over https, so the socket has to be wss or the browser drops it as mixed
+  // content; the same pairing the other way for a plain-http deployment.
+  gateway.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+  // Host and port separately: assigning `host` a value without a port keeps the old one, which
+  // would send the browser to the public name on the server's internal port.
+  gateway.hostname = origin.hostname;
+  gateway.port = origin.port;
+  gateway.username = "";
+  gateway.password = "";
+  gateway.hash = "";
+  return gateway.toString();
+}
+
+/** The hosts that mean "this machine", in the spellings a URL can carry them. */
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1"
+  );
+}
+
+/**
  * Resolve the Intelligence contract, or refuse to start.
  *
  * The addresses default to this server's own `/api/intelligence` and `/api/intelligence-gateway`,
@@ -1051,13 +1126,18 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
    * itself, at the address `/info` gives it, so a server that reaches Intelligence somewhere the
    * browser cannot follow names the browser's address here. The server in OpenBot Desktop's
    * container does: it reaches local Intelligence at `host.docker.internal`, and the window on the
-   * host reaches the same gateway at `localhost`. Unset, the browser is given `gatewayWsUrl`, as
-   * before.
+   * host reaches the same gateway at `localhost`.
+   *
+   * Unset, and the built-in platform's own loopback default is what the browser would be handed —
+   * which works only for a browser on this machine. A deployment that has told us its public
+   * address gets that address instead: same path, the host the browser can actually reach. The
+   * symptom of getting this wrong is quiet (the page loads, the message sends, no reply ever
+   * streams), so deriving it is worth more than the line it costs. See
+   * {@link browserGatewayForPublicOrigin}.
    */
-  const browserGatewayWsUrl = url(
-    environment,
-    "INTELLIGENCE_BROWSER_GATEWAY_WS_URL",
-  );
+  const browserGatewayWsUrl =
+    url(environment, "INTELLIGENCE_BROWSER_GATEWAY_WS_URL") ??
+    browserGatewayForPublicOrigin(environment, settings.gatewayWsUrl);
 
   return {
     mode: "intelligence",

@@ -224,6 +224,92 @@ describe("deployment configuration", () => {
   });
 
   /*
+   * The browser is told where the gateway is in `/info`. On a laptop that address is this server's
+   * own localhost, which is right; on a deployment with its own public address it is not, and the
+   * failure is quiet — the page loads, the message sends, no reply ever streams. So a deployment
+   * that named its public address gets the same gateway path on that host.
+   */
+  test("derives the browser's gateway from the deployment's public address", () => {
+    // The addresses left unset, so this is the built-in platform's own default path — the case a
+    // headless deployment actually lands in.
+    const environment: Record<string, string | undefined> = {
+      ...baseEnvironment,
+      OPENBOT_PUBLIC_URL: "https://openbot.example.com",
+    };
+    delete environment.INTELLIGENCE_GATEWAY_WS_URL;
+    const config = loadConfig(environment);
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    // wss, because the page is https and a plain ws is dropped as mixed content. No port: the
+    // public address has none, and carrying the server's own 7103 would be unreachable.
+    expect(config.runtime.intelligence.browserGatewayWsUrl).toBe(
+      "wss://openbot.example.com/api/intelligence-gateway",
+    );
+    // The server keeps dialling its own loopback address; only the browser's copy moves.
+    expect(config.runtime.intelligence.gatewayWsUrl).toBe(
+      "ws://localhost:3001/api/intelligence-gateway",
+    );
+  });
+
+  test("keeps the port the public address names", () => {
+    const environment: Record<string, string | undefined> = {
+      ...baseEnvironment,
+      OPENBOT_PUBLIC_URL: "http://192.168.1.10:3001",
+    };
+    delete environment.INTELLIGENCE_GATEWAY_WS_URL;
+    const config = loadConfig(environment);
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.browserGatewayWsUrl).toBe(
+      "ws://192.168.1.10:3001/api/intelligence-gateway",
+    );
+  });
+
+  test("says nothing when the deployment has no public address to derive from", () => {
+    // Unchanged behaviour: the browser is given the configured gateway, which on a laptop is this
+    // same machine.
+    const config = loadConfig(baseEnvironment);
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.browserGatewayWsUrl).toBeUndefined();
+  });
+
+  test("does not derive over a gateway somebody pointed elsewhere", () => {
+    // A self-hosted Intelligence on another machine already names a host the browser understands.
+    const config = loadConfig({
+      ...baseEnvironment,
+      OPENBOT_PUBLIC_URL: "https://openbot.example.com",
+      INTELLIGENCE_GATEWAY_WS_URL:
+        "wss://intelligence.example.com/api/intelligence-gateway",
+    });
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.browserGatewayWsUrl).toBeUndefined();
+  });
+
+  test("an explicit browser gateway wins over the derived one", () => {
+    const config = loadConfig({
+      ...baseEnvironment,
+      OPENBOT_PUBLIC_URL: "https://openbot.example.com",
+      INTELLIGENCE_BROWSER_GATEWAY_WS_URL: "wss://edge.example.com/gw",
+    });
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.browserGatewayWsUrl).toBe(
+      "wss://edge.example.com/gw",
+    );
+  });
+
+  /*
    * The platform key is the whole credential on the built-in platform: behind it every thread and
    * memory route trusts the `x-cpki-user-id` header, so one key covers every person's
    * conversations. `.env.example` ships a placeholder so a clone runs; a deployment that asks its
