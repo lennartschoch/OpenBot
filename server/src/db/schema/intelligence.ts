@@ -7,6 +7,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
 } from "drizzle-orm/pg-core";
 import { customType } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -77,6 +78,15 @@ export const intelligenceThreadEvents = pgTable(
       table.seq,
     ),
     index("intelligence_thread_events_thread_idx").on(table.threadId, table.id),
+    /*
+     * Replay resolves a client's `cpki_event_id` cursor through this lookup. Declared here
+     * rather than left to the migration alone: an index the schema does not know about is
+     * one a later `drizzle-kit generate` cannot keep honest, and this one is what stops a
+     * reconnect scanning the thread's whole log.
+     */
+    index("intelligence_thread_events_cpki_idx").on(
+      sql`(("event" -> 'metadata') ->> 'cpki_event_id')`,
+    ),
   ],
 );
 
@@ -127,7 +137,7 @@ export const intelligenceUserJoinCodes = pgTable(
 export const intelligenceChannelFiles = pgTable(
   "intelligence_channel_files",
   {
-    handle: text("handle").default(sql`gen_random_uuid()`).primaryKey(),
+    handle: uuid("handle").default(sql`gen_random_uuid()`).primaryKey(),
     deliveryId: text("delivery_id"),
     operationId: text("operation_id"),
     filename: text("filename"),
