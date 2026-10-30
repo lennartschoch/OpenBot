@@ -1517,17 +1517,22 @@ describe("long-thread replay and inspector pages", () => {
   let app: ReturnType<typeof intelligence>;
   beforeAll(() => (app = intelligence()));
 
-  test("a cursor near the end replays only what follows it", async () => {
+  /**
+   * A thread whose log is `count` events long, written straight to the table: the
+   * runner stamps `cpki_event_seq`, but 2000+ event pushes through the gateway would
+   * only be slower, not more realistic. Event 1500 is a `STATE_SNAPSHOT` and 2000 a
+   * `STATE_DELTA`, so the fold has something to fold.
+   */
+  async function longThread(count: number) {
     const threadId = unique();
     const userId = `long-${unique()}`;
     await call(app, "/api/threads", {
       method: "POST",
       body: JSON.stringify({ threadId, userId, agentId: "a1" }),
     });
-
     const database = createDatabase(testDatabaseUrl(), TEST_POOL);
     const runId = `run-${unique()}`;
-    const rows = Array.from({ length: 2105 }, (_, index) => ({
+    const rows = Array.from({ length: count }, (_, index) => ({
       threadId,
       runId,
       seq: index + 1,
@@ -1549,15 +1554,44 @@ describe("long-thread replay and inspector pages", () => {
       },
     }));
     await database.insert(intelligenceThreadEvents).values(rows);
+    return { threadId, userId };
+  }
 
-    const after = await app.store.listEventsAfter(threadId, "bulk-1500");
-    expect(after.length).toBe(605);
-    expect((after[0].metadata as { cpki_event_id: string }).cpki_event_id).toBe(
-      "bulk-1501",
+  /** A client socket joined to a thread, recording every frame the gateway sends. */
+  async function viewer(threadId: string, userId: string) {
+    const minted = await call(
+      app,
+      `/api/threads/${threadId}/join-code?userId=${userId}`,
     );
+    const socket = captureSocket({
+      phoenix: "client",
+      joinToken: minted.body.joinToken,
+    });
+    app.gateway.handle(
+      socket,
+      JSON.stringify([
+        null,
+        "1",
+        `thread:${threadId}`,
+        "phx_join",
+        { stream_mode: "connect" },
+      ]),
+    );
+    return socket;
+  }
+
+  test("a cursor near the end replays only what follows it", async () => {
+    const { threadId, userId } = await longThread(2105);
+    const after = await app.store.eventRowIdAfter(threadId, "bulk-1500");
+    const page = await app.store.eventPageAfter(threadId, after);
+    expect(page.events.length).toBe(605);
     expect(
-      (after.at(-1)!.metadata as { cpki_event_id: string }).cpki_event_id,
+      (page.events[0].metadata as { cpki_event_id: string }).cpki_event_id,
+    ).toBe("bulk-1501");
+    expect(
+      (page.events.at(-1)!.metadata as { cpki_event_id: string }).cpki_event_id,
     ).toBe("bulk-2105");
+    expect(page.nextAfterId).toBeNull();
 
     const inspector = await call(
       app,
@@ -1572,6 +1606,44 @@ describe("long-thread replay and inspector pages", () => {
       state: { count: 2 },
       skippedDeltas: 0,
     });
+
+    await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId, agentId: "a1" }),
+    });
+  });
+
+  test("a thread longer than one page is replayed to its end", async () => {
+    // The regression: a replay sent one 2000-event page, then answered
+    // `replay_complete` with the newest event's id. The client stored that as its
+    // cursor, so events 2001..2105 were never sent and never asked for again.
+    const { threadId, userId } = await longThread(2105);
+    const socket = await viewer(threadId, userId);
+    // The join is dispatched off the frame handler, so the replay lands asynchronously.
+    // Poll for the control frame that ends it rather than sleeping past a guess.
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (socket.frames.some((frame) => frame.includes("replay_complete")))
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    const frames = socket.frames.map(
+      (frame) => JSON.parse(frame) as Frame<Record<string, unknown>>,
+    );
+    const replayed = frames.filter((frame) => frame[3] === "ag_ui_event");
+    expect(replayed.length).toBe(2105);
+    expect(replayed[0][4].metadata).toEqual({
+      cpki_event_id: "bulk-1",
+      cpki_event_seq: 1,
+    });
+    // The last event the client was told about is the last event in the log, so
+    // the cursor `replay_complete` carries covers exactly what was delivered.
+    expect(replayed.at(-1)![4].metadata).toEqual({
+      cpki_event_id: "bulk-2105",
+      cpki_event_seq: 2105,
+    });
+    const complete = frames.find((frame) => frame[3] === "replay_complete");
+    expect(complete?.[4].latestEventId).toBe("bulk-2105");
 
     await call(app, `/api/threads/${threadId}`, {
       method: "DELETE",

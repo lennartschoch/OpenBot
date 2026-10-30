@@ -125,6 +125,12 @@ function memoryKey(content: string): string {
 const JOIN_TOKEN_TTL_MS = 60 * 60_000;
 /** The hosted platform answers every lock acquisition with this TTL, whatever was asked. */
 const LOCK_TTL_SECONDS = 120;
+/**
+ * How many events a replay reads per query. Not a cap on the replay: the gateway
+ * walks pages until the log is drained, so a thread longer than this is still fully
+ * delivered — the page only bounds one query's result set.
+ */
+const REPLAY_PAGE_SIZE = 2000;
 
 export class IntelligenceStore {
   constructor(private readonly db: Database) {}
@@ -388,49 +394,68 @@ export class IntelligenceStore {
   }
 
   /**
-   * The events a reconnecting client has not seen, keyed on the runner's
-   * `cpki_event_id` cursor (the durable id the client tracks).
+   * The log row a reconnecting client's `cpki_event_id` cursor names, or 0 when
+   * there is no cursor and when this log has never held one.
    *
-   * The cursor is resolved to its row and the page is read after it in SQL. The
-   * earlier version read the first 2000 events and looked for the cursor among
-   * them, so on a longer thread a recent cursor was never found and the oldest
-   * page was replayed instead. A cursor this log has never seen falls back to
-   * the whole log, which is what a browser whose history was rebuilt needs.
+   * The cursor is resolved in SQL rather than by reading a page and looking for it
+   * among the results: on a longer thread the cursor is not in the newest page, and
+   * an earlier version that searched a page replayed the oldest events instead. A
+   * cursor this log has never seen resolves to 0, which replays the whole log — what
+   * a browser whose history was rebuilt needs.
    */
-  async listEventsAfter(
+  async eventRowIdAfter(
     threadId: string,
     cpkiEventId: string | null,
-    limit = 2000,
-  ): Promise<Record<string, unknown>[]> {
-    const eventOf = (row: typeof intelligenceThreadEvents.$inferSelect) =>
-      row.event as Record<string, unknown>;
-    let afterId = 0;
-    if (cpkiEventId) {
-      const [anchor] = await this.db
-        .select({ id: intelligenceThreadEvents.id })
-        .from(intelligenceThreadEvents)
-        .where(
-          and(
-            eq(intelligenceThreadEvents.threadId, threadId),
-            sql`${intelligenceThreadEvents.event}->'metadata'->>'cpki_event_id' = ${cpkiEventId}`,
-          ),
-        )
-        .orderBy(asc(intelligenceThreadEvents.id))
-        .limit(1);
-      if (anchor) afterId = anchor.id;
-    }
+  ): Promise<number> {
+    if (!cpkiEventId) return 0;
+    const [anchor] = await this.db
+      .select({ id: intelligenceThreadEvents.id })
+      .from(intelligenceThreadEvents)
+      .where(
+        and(
+          eq(intelligenceThreadEvents.threadId, threadId),
+          sql`${intelligenceThreadEvents.event}->'metadata'->>'cpki_event_id' = ${cpkiEventId}`,
+        ),
+      )
+      .orderBy(asc(intelligenceThreadEvents.id))
+      .limit(1);
+    return anchor?.id ?? 0;
+  }
+
+  /**
+   * One page of the log after a row id, in log order, with the id to continue from.
+   *
+   * `nextAfterId` is null once the walk has reached the end, which is what lets a
+   * replay deliver a thread longer than one page: the caller loops until null. The
+   * earlier replay sent a single page and then reported the newest event's id as the
+   * client's cursor, so everything past the page was skipped for good.
+   */
+  async eventPageAfter(
+    threadId: string,
+    afterRowId: number,
+    limit = REPLAY_PAGE_SIZE,
+  ): Promise<{
+    events: Record<string, unknown>[];
+    nextAfterId: number | null;
+  }> {
     const rows = await this.db
       .select()
       .from(intelligenceThreadEvents)
       .where(
         and(
           eq(intelligenceThreadEvents.threadId, threadId),
-          afterId > 0 ? gt(intelligenceThreadEvents.id, afterId) : undefined,
+          afterRowId > 0
+            ? gt(intelligenceThreadEvents.id, afterRowId)
+            : undefined,
         ),
       )
       .orderBy(asc(intelligenceThreadEvents.id))
       .limit(limit);
-    return rows.map(eventOf);
+    const last = rows.at(-1);
+    return {
+      events: rows.map((row) => row.event as Record<string, unknown>),
+      nextAfterId: rows.length < limit || !last ? null : last.id,
+    };
   }
 
   /** Whether a run holds the thread right now, whether or not it has emitted an event. */

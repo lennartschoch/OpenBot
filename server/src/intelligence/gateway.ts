@@ -277,6 +277,12 @@ export class IntelligenceGateway {
    * `replay_complete` closes a client-initiated stream, `stream_idle` tells a
    * connect-mode subscriber there is no active run to wait for.
    *
+   * The walk is paged and drained before the control events, because
+   * `replay_complete` hands the client its next `last_seen_event_id`. A single page
+   * used to be replayed and then the newest event's id reported, so on a thread past
+   * one page the client's cursor skipped events it never received and never asked for
+   * them again.
+   *
    * A run join gets neither: the hosted gateway sends a run-mode subscriber no
    * history and no control events, because the run it is waiting for has not
    * produced any yet.
@@ -291,9 +297,14 @@ export class IntelligenceGateway {
       typeof params.last_seen_event_id === "string"
         ? params.last_seen_event_id
         : null;
-    const rows = await this.store.listEventsAfter(threadId, cursor);
-    for (const row of rows) {
-      send(ws, `thread:${threadId}`, AG_UI_EVENT, row);
+    let afterRowId = await this.store.eventRowIdAfter(threadId, cursor);
+    for (;;) {
+      const page = await this.store.eventPageAfter(threadId, afterRowId);
+      for (const row of page.events) {
+        send(ws, `thread:${threadId}`, AG_UI_EVENT, row);
+      }
+      if (page.nextAfterId === null || page.events.length === 0) break;
+      afterRowId = page.nextAfterId;
     }
     const latest = await this.store.latestEvent(threadId);
     const control = {
