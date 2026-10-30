@@ -216,6 +216,8 @@ export type TenantPackage = {
     provider: "openai" | "anthropic";
     credentialSecretRef: string;
     defaultModel: string;
+    /** Optional reasoning effort for models with an effort knob (see `model.yaml`). */
+    reasoningEffort?: string;
   };
   /**
    * What `knowledge.yaml` says this deployment may connect to.
@@ -644,6 +646,10 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
         "model.credential_secret_ref",
       ),
       defaultModel: requiredString(model.default_model, "model.default_model"),
+      ...(typeof model.reasoning_effort === "string" &&
+      model.reasoning_effort.trim()
+        ? { reasoningEffort: model.reasoning_effort.trim() }
+        : {}),
     },
     knowledgeSources: sources,
     skills: packageSkills,

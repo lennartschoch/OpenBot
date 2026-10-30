@@ -196,6 +196,12 @@ export function standingRoleMessage(
 export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
+  /**
+   * How hard the model should think, for providers with an effort knob (OpenAI-compatible
+   * reasoning models). Unset leaves the provider's default; a hosted reasoning model on a
+   * self-hosted endpoint answers a one-liner in ten seconds at `low` and two minutes at `high`.
+   */
+  reasoningEffort?: string;
   plan?: PlanModelConfig;
 };
 
@@ -256,6 +262,7 @@ export function runtimeModelForEnvironment(
   return {
     provider,
     plan: planModelForEnvironment(environment),
+    reasoningEffort: packageModel.reasoningEffort,
     defaultModel:
       selectedModelApplies && selectedModel ? selectedModel : defaultModel,
   };
@@ -520,6 +527,15 @@ export function builtInAgentConfiguration(
               ),
           })),
           maxSteps: TOOL_STEPS,
+        }
+      : {}),
+    // The effort knob for OpenAI-compatible reasoning models: a hosted V4-class model
+    // defaults to its hardest setting, which is minutes per turn behind a chat reply.
+    ...(model.provider === "openai" && model.reasoningEffort
+      ? {
+          providerOptions: {
+            openai: { reasoningEffort: model.reasoningEffort },
+          },
         }
       : {}),
   };

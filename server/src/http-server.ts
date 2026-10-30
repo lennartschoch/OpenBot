@@ -133,9 +133,13 @@ export function startHttpServer(deps: {
         }
         const plane = intelligencePlaneOf(url.pathname);
         if (plane && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const data = intelligence.gateway.socketData(plane, request);
           if (
             server.upgrade(request, {
-              data: intelligence.gateway.socketData(plane, request),
+              data,
+              // Phoenix announces `["phoenix", "base64url.bearer.phx.…"]` and the
+              // socket is closed as failed negotiation unless one is echoed.
+              ...(data.subprotocol ? { protocols: [data.subprotocol] } : {}),
             })
           ) {
             return undefined as unknown as Response;
@@ -279,7 +283,8 @@ function intelligencePlaneOf(
 ): "runner" | "client" | "channels" | null {
   const base = "/api/intelligence-gateway";
   if (!pathname.startsWith(base)) return null;
-  const rest = pathname.slice(base.length);
+  // The transport appends `/websocket` to the plane path on connect.
+  const rest = pathname.slice(base.length).replace(/\/websocket\/?$/, "");
   return rest === "/runner" || rest === "/client" || rest === "/channels"
     ? (rest.slice(1) as "runner" | "client" | "channels")
     : null;

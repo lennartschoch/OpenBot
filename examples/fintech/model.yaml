@@ -2,3 +2,5 @@ model:
   provider: openai
   credential_secret_ref: openai-api-key
   default_model: deepseek-flash
+  # The V4-class model defaults to its hardest thinking setting; low answers a one-liner in seconds.
+  reasoning_effort: low

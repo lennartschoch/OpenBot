@@ -32,6 +32,8 @@ export type PhoenixData = {
   joinToken?: string;
   /** The runner plane's bearer key, carried as the socket's `token` param. */
   token?: string;
+  /** The subprotocol echoed back on the upgrade, if the client announced one. */
+  subprotocol?: string;
 };
 type SocketData = PhoenixData;
 
@@ -41,6 +43,8 @@ const REPLAY_COMPLETE_EVENT = "replay_complete";
 const REPLAY_FAILED_EVENT = "replay_failed";
 const STREAM_IDLE_EVENT = "stream_idle";
 const AG_UI_EVENT = "ag_ui_event";
+/** The runner plane's channel event name (its `stop_run` relay rides this). */
+const RUNNER_EVENT = "ag-ui";
 
 export class IntelligenceGateway {
   private readonly subscribers = new Map<string, Set<GatewaySocket>>();
@@ -54,11 +58,25 @@ export class IntelligenceGateway {
     // param written before it can carry the suffix into its value.
     const clean = (value: string | null) =>
       value ? value.replace(/\/websocket$/, "") : undefined;
+    // The runner plane's bearer token rides the upgrade as a subprotocol
+    // (`base64url.bearer.phx.<token>`), not a query param.
+    const subprotocol = request.headers.get("sec-websocket-protocol") ?? "";
+    const bearer = subprotocol
+      .split(",")
+      .map((part) => part.trim())
+      .find((part) => part.startsWith("base64url.bearer.phx."));
+    const runnerToken = bearer
+      ? atob(bearer.slice("base64url.bearer.phx.".length).padEnd(4, "="))
+      : clean(url.searchParams.get("token"));
     return {
       phoenix: plane,
       joined: new Map(),
       joinToken: clean(url.searchParams.get("join_token")),
-      token: clean(url.searchParams.get("token")),
+      token: runnerToken,
+      // The subprotocol the server echoes back: Phoenix clients announce
+      // `["phoenix", "base64url.bearer.phx.…"]`, and the socket is closed as
+      // failed negotiation unless the answer names one of them.
+      subprotocol: subprotocol.includes("phoenix") ? "phoenix" : undefined,
     };
   }
 
@@ -265,7 +283,11 @@ export class IntelligenceGateway {
       runId,
       stamped,
     );
+    // The hosted platform echoes every accepted push back on the ingestion
+    // channel (that echo is what feeds the runner's own event stream) and
+    // rebroadcasts it on the thread channel for viewers.
     for (const event of stored) {
+      this.broadcast(ingestionTopic, RUNNER_EVENT, event);
       this.broadcast(`thread:${threadId}`, AG_UI_EVENT, event);
     }
     const finished = stored.some((event) => event.type === EventType.RUN_FINISHED);
@@ -282,7 +304,7 @@ export class IntelligenceGateway {
    */
   private relayStop(threadTopic: string, payload: Record<string, unknown>): void {
     const threadId = threadTopic.slice("thread:".length);
-    this.broadcast(`ingestion:${String(payload.run_id ?? payload.runId ?? "")}`, AG_UI_EVENT, {
+    this.broadcast(`ingestion:${String(payload.run_id ?? payload.runId ?? "")}`, RUNNER_EVENT, {
       type: "CUSTOM",
       name: "stop",
       timestamp: Date.now(),
