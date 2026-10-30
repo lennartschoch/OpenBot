@@ -2785,6 +2785,8 @@ const localIntelligence = createLocalIntelligence({
   database,
   apiKey: config.runtime.intelligence.apiKey,
   serviceToken: config.learningSetup?.serviceToken,
+  // Protocol debugging, off unless asked for: `INTELLIGENCE_GATEWAY_DEBUG=1`.
+  debug: Boolean(process.env.INTELLIGENCE_GATEWAY_DEBUG),
 });
 
 startHttpServer({

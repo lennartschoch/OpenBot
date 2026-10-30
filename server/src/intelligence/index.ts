@@ -15,9 +15,11 @@ export function createLocalIntelligence(deps: {
   apiKey: string;
   /** The project service token, accepted only when creating a Learning container. */
   serviceToken?: string;
+  /** Log every gateway frame. `INTELLIGENCE_GATEWAY_DEBUG`, read by the caller. */
+  debug?: boolean;
 }) {
   const store = new IntelligenceStore(deps.database);
-  const gateway = new IntelligenceGateway(store, deps.apiKey);
+  const gateway = new IntelligenceGateway(store, deps.apiKey, deps.debug);
   const rest = createIntelligenceRestRoutes({
     store,
     apiKey: deps.apiKey,

@@ -561,10 +561,17 @@ export function createIntelligenceRestRoutes(
     return c.json(foldState(events));
   });
 
-  app.put("/connector/annotate/:clientEventId", async (c) => {
-    // Idempotent on the client event id, which is all the annotation loop needs.
-    return c.json({ id: c.req.param("clientEventId"), duplicate: false });
-  });
+  /**
+   * The annotation loop's arrival point, answered without recording anything.
+   *
+   * This deployment keeps no annotation analytics, so there is no row to be a duplicate
+   * of and `duplicate` is always false. The route exists because the client posts here
+   * on every annotation and treats a non-null body as acceptance; a 404 would make it
+   * retry forever.
+   */
+  app.put("/connector/annotate/:clientEventId", (c) =>
+    c.json({ id: c.req.param("clientEventId"), duplicate: false }),
+  );
 
   // ---- trajectory capture (Phase 2) ---------------------------------------
 

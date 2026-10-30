@@ -6,7 +6,7 @@ import type { OpenBotRole } from "./auth/roles";
 import { botBrowserRequestSeconds } from "./browser/bot-browser";
 import { browserRequestSeconds } from "./browser/routes";
 import { websocket as channelSocket } from "./channels/socket";
-import type { PhoenixData } from "./intelligence/gateway";
+import type { GatewaySocket, PhoenixData } from "./intelligence/gateway";
 import type { ComputerGateway } from "./computer/gateway";
 import { streamPathBotId } from "./computer/stream-path";
 import type { DeploymentConfig } from "./config";
@@ -33,19 +33,15 @@ type StreamData = {
 type ChannelSocket = Parameters<typeof channelSocket.open>[0];
 type SocketData = StreamData | ChannelSocket["data"] | PhoenixData;
 
-const isPhoenix = (data: SocketData): data is PhoenixData =>
-  typeof (data as PhoenixData).phoenix === "string";
-
 /**
- * The slice of a Bun server websocket the Phoenix gateway needs, and the data
- * an upgraded socket carries. Built by the gateway itself so the plane, the
- * channel registry and the connect params all agree.
+ * Which dispatcher owns this socket, narrowed on the socket rather than on its data
+ * so the handlers below need no cast: the gateway's `handle` takes a socket whose
+ * `data` is `PhoenixData`, and this leaves exactly that.
  */
-export type GatewaySocketLike = {
-  data: PhoenixData;
-  send: (data: string | ArrayBufferView) => void;
-  close: (code?: number, reason?: string) => void;
-};
+const isPhoenix = (ws: {
+  data: SocketData;
+}): ws is { data: PhoenixData } & GatewaySocket =>
+  typeof (ws.data as PhoenixData).phoenix === "string";
 
 export function startHttpServer(deps: {
   port: number;
@@ -63,8 +59,8 @@ export function startHttpServer(deps: {
         plane: PhoenixData["phoenix"],
         request: Request,
       ) => PhoenixData;
-      handle: (ws: GatewaySocketLike, raw: string | Buffer) => void;
-      handleClose: (ws: GatewaySocketLike) => void;
+      handle: (ws: GatewaySocket, raw: string | Buffer) => void;
+      handleClose: (ws: GatewaySocket) => void;
     };
   };
   app: {
@@ -232,7 +228,7 @@ export function startHttpServer(deps: {
     },
     websocket: {
       open(ws) {
-        if (isPhoenix(ws.data)) {
+        if (isPhoenix(ws)) {
           return;
         }
         if (!isProxiedStream(ws.data)) {
@@ -255,8 +251,8 @@ export function startHttpServer(deps: {
         inward.onerror = () => ws.close();
       },
       message(ws, raw) {
-        if (isPhoenix(ws.data)) {
-          intelligence?.gateway.handle(ws as unknown as GatewaySocketLike, raw);
+        if (isPhoenix(ws)) {
+          intelligence?.gateway.handle(ws, raw);
           return;
         }
         if (!isProxiedStream(ws.data)) {
@@ -266,8 +262,8 @@ export function startHttpServer(deps: {
         if (ws.data.inward?.readyState === 1) ws.data.inward.send(String(raw));
       },
       close(ws, code, reason) {
-        if (isPhoenix(ws.data)) {
-          intelligence?.gateway.handleClose(ws as unknown as GatewaySocketLike);
+        if (isPhoenix(ws)) {
+          intelligence?.gateway.handleClose(ws);
           return;
         }
         if (!isProxiedStream(ws.data)) {

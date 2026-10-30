@@ -18,7 +18,11 @@ import type { IntelligenceStore } from "./store";
  * from there.
  */
 
-/** The slice of a Bun server websocket the gateway uses. */
+/**
+ * The slice of a Bun server websocket the gateway uses. Structural on purpose: the
+ * server's `WebSocketHandler` socket satisfies it, so the caller narrows and passes
+ * the socket itself rather than casting a wider one into this shape.
+ */
 export type GatewaySocket = {
   data: PhoenixData;
   send: (data: string) => void;
@@ -40,7 +44,6 @@ export type PhoenixData = {
   /** The subprotocol echoed back on the upgrade, if the client announced one. */
   subprotocol?: string;
 };
-type SocketData = PhoenixData;
 
 const RUNNER_EVENT_BATCH_CAPABILITY = "runner_event_batch_v1";
 const STOP_RUN_EVENT = "stop_run";
@@ -59,6 +62,12 @@ export class IntelligenceGateway {
     private readonly store: IntelligenceStore,
     /** The deployment key the runner plane and the channels plane must present. */
     private readonly apiKey: string,
+    /**
+     * Log every frame the gateway handles. Off unless asked for, and read once where
+     * the gateway is built rather than on every frame: it is a protocol-debugging
+     * switch, not a runtime condition.
+     */
+    private readonly debug = false,
   ) {}
 
   /** Build the socket state for a fresh upgrade, from its connect params. */
@@ -97,8 +106,8 @@ export class IntelligenceGateway {
     const message = parseFrame(raw);
     if (!message) return;
     const { joinRef, ref, topic, event, payload } = message;
-    const data = ws.data as SocketData;
-    if (process.env.INTELLIGENCE_GATEWAY_DEBUG)
+    const data = ws.data;
+    if (this.debug)
       console.log(`[gateway] ${data.phoenix} ${topic} -> ${event}`);
     switch (event) {
       case "phx_join":
@@ -132,7 +141,7 @@ export class IntelligenceGateway {
   }
 
   handleClose(ws: GatewaySocket): void {
-    const data = ws.data as SocketData;
+    const data = ws.data;
     for (const topic of data.joined.keys()) {
       this.unsubscribe(topic, ws);
     }
@@ -211,11 +220,13 @@ export class IntelligenceGateway {
     ref: string | null,
     params: Record<string, unknown>,
   ): Promise<void> {
-    const data = ws.data as SocketData;
-    if (process.env.INTELLIGENCE_GATEWAY_DEBUG)
+    const data = ws.data;
+    if (this.debug) {
+      // The token identifies a thread channel, so it is named by kind and not printed.
       console.log(
-        `[gateway] join ${topic} plane=${data.phoenix} token=${data.joinToken ?? "none"}`,
+        `[gateway] join ${topic} plane=${data.phoenix} token=${data.joinToken ? "present" : "none"}`,
       );
+    }
     // The runner plane is the deployment's own process: it presents the
     // platform key and may only write into an ingestion channel. The client
     // plane presents a minted join token, once, for the one channel it names.
@@ -350,7 +361,7 @@ export class IntelligenceGateway {
     ref: string | null,
     payload: Record<string, unknown>,
   ): Promise<void> {
-    const data = ws.data as SocketData;
+    const data = ws.data;
     if (data.phoenix !== "runner") {
       replyError(ws, null, ref, ingestionTopic, { reason: "unauthorized" });
       return;
