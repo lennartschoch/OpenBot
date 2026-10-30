@@ -22,7 +22,10 @@ test("a file that opens a database pool closes it", async () => {
   const leaking: string[] = [];
   for (const file of files) {
     const source = await Bun.file(file).text();
-    if (source.includes("createDatabase(") && !source.includes("$client.close")) {
+    if (
+      source.includes("createDatabase(") &&
+      !source.includes("$client.close")
+    ) {
       leaking.push(file);
     }
   }

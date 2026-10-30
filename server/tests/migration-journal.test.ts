@@ -561,19 +561,28 @@ describe("the migration journal", () => {
      */
     const entries = await readJournal();
 
+    /*
+     * The snapshot that brackets a migration is the one its PREDECESSOR IN THE JOURNAL wrote, not
+     * the one whose file is numbered `idx - 1`. Those are the same thing only while every index is
+     * taken, and the journal does not require that: indices are file names, and a branch that
+     * numbers away from upstream's sequence (a fork that syncs, so its migrations never collide
+     * with the ones that merge in behind them) leaves a gap that `drizzle-kit check` accepts.
+     * Arithmetic on the index then reads a snapshot that never existed.
+     */
     const wrong: string[] = [];
+    let before: Snapshot = {};
     for (const entry of entries) {
       const sql = await readFile(
         new URL(`${entry.tag}.sql`, directory),
         "utf8",
       );
       const after = await readSnapshot(entry.idx);
-      const before = entry.idx === 0 ? {} : await readSnapshot(entry.idx - 1);
       wrong.push(
         ...disagreements(sql, before, after).map(
           (problem) => `${entry.tag}: ${problem}`,
         ),
       );
+      before = after;
     }
 
     expect(wrong).toEqual([]);

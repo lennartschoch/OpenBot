@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createDatabase } from "../src/db/client";
 import { intelligenceThreadEvents } from "../src/db/schema/intelligence";
@@ -17,9 +17,21 @@ import { TEST_POOL, testDatabaseUrl } from "./support/database";
 const API_KEY = "integration-key";
 const SERVICE_TOKEN = "service-token";
 
+/*
+ * One pool for the file rather than one per `describe`. Each block builds its own platform — store,
+ * gateway, routes — but they all read the same database, so they can share the client. Registered
+ * here and closed last, like every other file that opens one: `bun test` runs the whole suite in one
+ * process, and a pool holds its connections until it is closed.
+ */
+const database = createDatabase(testDatabaseUrl(), TEST_POOL);
+
+afterAll(async () => {
+  await database.$client.close();
+});
+
 function intelligence() {
   return createLocalIntelligence({
-    database: createDatabase(testDatabaseUrl(), TEST_POOL),
+    database,
     apiKey: API_KEY,
     serviceToken: SERVICE_TOKEN,
   });
@@ -1825,7 +1837,6 @@ describe("long-thread replay and inspector pages", () => {
       method: "POST",
       body: JSON.stringify({ threadId, userId, agentId: "a1" }),
     });
-    const database = createDatabase(testDatabaseUrl(), TEST_POOL);
     const runId = `run-${unique()}`;
     const rows = Array.from({ length: count }, (_, index) => ({
       threadId,
