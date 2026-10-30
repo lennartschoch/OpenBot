@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import {
   decodeThreadCursor,
@@ -114,10 +114,20 @@ export function createIntelligenceRestRoutes(
       userId: string;
       agentId: string;
       name?: string;
+      learningContainerId?: string;
     }>();
     const existing = await store.getThread(body.threadId);
     if (existing)
       return c.json({ error: { code: "CONFLICT", retryable: false } }, 409);
+    if (
+      body.learningContainerId &&
+      !(await store.containerExists(body.learningContainerId))
+    ) {
+      return c.json(
+        { error: { code: "LEARNING_CONTAINER_NOT_FOUND", retryable: false } },
+        404,
+      );
+    }
     const row = await store.createThread(body);
     const thread = row ? summary(row) : null;
     if (!thread)
@@ -201,6 +211,15 @@ export function createIntelligenceRestRoutes(
     }>();
     if (!body.runId || !body.userId || !body.agentId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    if (
+      body.learningContainerId &&
+      !(await store.containerExists(body.learningContainerId))
+    ) {
+      return c.json(
+        { error: { code: "LEARNING_CONTAINER_NOT_FOUND", retryable: false } },
+        404,
+      );
+    }
     // Hosted lock and connect create the thread for the caller on first use,
     // and refuse a thread somebody else owns.
     const thread = await store.ensureThreadForUser({
@@ -209,6 +228,9 @@ export function createIntelligenceRestRoutes(
       agentId: body.agentId,
     });
     if (!thread) return notFound(c);
+    if (body.learningContainerId) {
+      await store.assignLearningContainer(threadId, body.learningContainerId);
+    }
     const result = await store.acquireLock({
       threadId,
       runId: body.runId,
@@ -414,6 +436,46 @@ export function createIntelligenceRestRoutes(
 
   app.get("/api/inspector/metadata", (c) => c.body(null, 204));
 
+  /**
+   * The Inspector's Learning panel reads a versioned snapshot, not a 404. This
+   * deployment runs no Learning engine, so the snapshot is empty; its links use
+   * the request's own origin when that origin is a safe dashboard transport.
+   */
+  app.get("/api/inspector/learning", (c) => {
+    const url = new URL(c.req.url);
+    const local =
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
+      return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+    }
+    const origin = url.origin;
+    return c.json({
+      schemaVersion: 1,
+      projectKey: "local",
+      snapshotVersion: randomUUID(),
+      webAppOrigin: origin,
+      configuration: { state: "not_configured" },
+      pendingThreadCount: 0,
+      run: { hasActiveRun: false, hasEverSucceeded: false, latest: null },
+      pendingCandidateCount: 0,
+      skillsPage: { page: 1, pageSize: 3, total: 0, totalPages: 0, items: [] },
+      insightsPage: {
+        page: 1,
+        pageSize: 4,
+        total: 0,
+        totalPages: 0,
+        items: [],
+      },
+      links: {
+        learning: `${origin}/o/local/local/learning`,
+        candidates: null,
+        runs: null,
+      },
+    });
+  });
+
   app.get("/api/_inspect/threads/:id/events", async (c) => {
     const page = await store.listEventsPage(c.req.param("id"));
     return c.json({
@@ -473,19 +535,94 @@ export function createIntelligenceRestRoutes(
 
   // ---- learning (Phase 3: containers, skill-ZIP snapshots) ----------------
 
+  const containerSummary = (row: {
+    id: string;
+    name: string;
+    projectId: number;
+    promptContext: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }) => ({
+    id: row.id,
+    name: row.name,
+    projectId: row.projectId,
+    promptContext: row.promptContext,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+
   app.get("/api/v1/learning/containers", async (c) => {
     const rows = await store.listContainers();
     return c.json({
-      containers: rows.map((row) => ({
-        id: row.id,
-        name: row.name,
-        projectId: row.projectId,
-        promptContext: row.promptContext,
-        createdAt: row.createdAt.toISOString(),
-        updatedAt: row.updatedAt.toISOString(),
-      })),
+      containers: rows.map(containerSummary),
       nextCursor: null,
     });
+  });
+
+  app.get("/api/v1/learning/containers/:id", async (c) => {
+    const rows = await store.listContainers();
+    const row = rows.find((container) => container.id === c.req.param("id"));
+    if (!row)
+      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
+    return c.json({ container: containerSummary(row) });
+  });
+
+  /**
+   * Several Skill snapshots in one authorized request, as the runtime's
+   * multi-container registry asks for them. Each entry is a snapshot, an
+   * unchanged answer for a matching If-None-Match, or a per-container error.
+   */
+  app.post("/api/v1/learning/skills/batch", async (c) => {
+    const body = await c.req.json<{
+      containers?: {
+        containerId?: string;
+        revision?: string;
+        ifNoneMatch?: string;
+      }[];
+    }>();
+    const requests = Array.isArray(body.containers)
+      ? body.containers.slice(0, 50)
+      : [];
+    const containers = [];
+    for (const request of requests) {
+      const containerId = request?.containerId;
+      if (!containerId || !(await store.containerExists(containerId))) {
+        containers.push({
+          containerId: containerId ?? "",
+          status: "error",
+          error: { code: "CONTAINER_NOT_FOUND", retryable: false },
+        });
+        continue;
+      }
+      const found = await store.skillRevision(containerId, request.revision);
+      if (!found) {
+        containers.push({
+          containerId,
+          status: "error",
+          error: { code: "REVISION_NOT_FOUND", retryable: false },
+        });
+        continue;
+      }
+      const etag = `"${createHash("sha256").update(found.archive).digest("hex")}"`;
+      if (request.ifNoneMatch === etag) {
+        containers.push({
+          containerId,
+          status: "unchanged",
+          revision: found.revision,
+          etag,
+        });
+        continue;
+      }
+      containers.push({
+        containerId,
+        status: "snapshot",
+        revision: found.revision,
+        etag,
+        contentType: "application/zip",
+        bytesBase64: found.archive.toString("base64"),
+      });
+    }
+    return c.json({ containers });
   });
 
   /** A project's service token creates its Learning container (idempotent). */
@@ -510,9 +647,8 @@ export function createIntelligenceRestRoutes(
   app.get("/api/v1/learning/containers/:id/skills", async (c) => {
     const containerId = c.req.param("id");
     const revision = c.req.query("revision");
-    const containers = await store.listContainers();
-    if (!containers.some((row) => row.id === containerId))
-      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 403);
+    if (!(await store.containerExists(containerId)))
+      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
     const found = await store.skillRevision(containerId, revision);
     if (!found)
       return c.json({ error: { code: "REVISION_NOT_FOUND" } }, 403);
@@ -539,6 +675,13 @@ export function createIntelligenceRestRoutes(
     });
     return c.json({ revision });
   });
+
+  app.post("/api/v1/learning/containers/:id/runs", (c) =>
+    c.json(
+      { error: { code: "LEARNING_ENGINE_UNAVAILABLE", retryable: false } },
+      501,
+    ),
+  );
 
   app.get("/api/v1/learning/containers/:id/runs", (c) =>
     c.json({ runs: [] }),

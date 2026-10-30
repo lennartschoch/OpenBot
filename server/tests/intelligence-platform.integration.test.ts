@@ -285,7 +285,135 @@ describe("entitlements, learning and files", () => {
     const missing = await app.rest.request(`/api/v1/learning/containers/nope/skills`, {
       headers: { authorization: `Bearer ${API_KEY}`, accept: "application/zip" },
     });
-    expect(missing.status).toBe(403);
+    expect(missing.status).toBe(404);
+  });
+
+  test("a container reads back, a thread records its assignment, and the batch serves several snapshots", async () => {
+    const containerId = `c-${unique()}`;
+    const created = await call(app, "/api/learning/projects/1/containers", {
+      method: "POST",
+      headers: { "x-copilotkit-ei-service-token": SERVICE_TOKEN },
+      body: JSON.stringify({ id: containerId, name: "Batch" }),
+    });
+    expect(created.status).toBe(201);
+
+    const container = await call(app, `/api/v1/learning/containers/${containerId}`);
+    expect(container.status).toBe(200);
+    expect(container.body.container.name).toBe("Batch");
+
+    const unavailable = await call(app, "/api/v1/learning/containers", {
+      method: "GET",
+    });
+    expect(unavailable.body.nextCursor).toBeNull();
+
+    const published = await call(app, `/api/v1/learning/containers/${containerId}/skills`, {
+      method: "PUT",
+      body: "zip-bytes",
+    });
+    expect(published.status).toBe(200);
+    const revision = published.body.revision;
+
+    const batch = await call(app, "/api/v1/learning/skills/batch", {
+      method: "POST",
+      body: JSON.stringify({ containers: [{ containerId }, { containerId: "missing" }] }),
+    });
+    expect(batch.status).toBe(200);
+    const [snapshot, missing] = batch.body.containers;
+    expect(snapshot.status).toBe("snapshot");
+    expect(snapshot.revision).toBe(revision);
+    expect(Buffer.from(snapshot.bytesBase64, "base64").toString()).toBe("zip-bytes");
+    expect(missing.error.code).toBe("CONTAINER_NOT_FOUND");
+
+    const unchanged = await call(app, "/api/v1/learning/skills/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        containers: [{ containerId, ifNoneMatch: snapshot.etag }],
+      }),
+    });
+    expect(unchanged.body.containers[0]).toEqual({
+      containerId,
+      status: "unchanged",
+      revision,
+      etag: snapshot.etag,
+    });
+
+    const unknownRevision = await call(app, "/api/v1/learning/skills/batch", {
+      method: "POST",
+      body: JSON.stringify({ containers: [{ containerId, revision: "nope" }] }),
+    });
+    expect(unknownRevision.body.containers[0].error.code).toBe("REVISION_NOT_FOUND");
+
+    const threadId = unique();
+    const withContainer = await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({
+        threadId,
+        userId: "u1",
+        agentId: "a1",
+        learningContainerId: containerId,
+      }),
+    });
+    expect(withContainer.status).toBe(201);
+    expect(withContainer.body.thread.learningContainerId).toBe(containerId);
+    expect(withContainer.body.thread.learningContainerIds).toEqual([containerId]);
+
+    const unknownContainer = await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({
+        threadId: unique(),
+        userId: "u1",
+        agentId: "a1",
+        learningContainerId: "missing",
+      }),
+    });
+    expect(unknownContainer.status).toBe(404);
+    expect(unknownContainer.body.error.code).toBe("LEARNING_CONTAINER_NOT_FOUND");
+
+    const lockUnknown = await call(app, `/api/threads/${unique()}/lock`, {
+      method: "POST",
+      body: JSON.stringify({
+        runId: unique(),
+        userId: "u1",
+        agentId: "a1",
+        learningContainerId: "missing",
+      }),
+    });
+    expect(lockUnknown.status).toBe(404);
+    expect(lockUnknown.body.error.code).toBe("LEARNING_CONTAINER_NOT_FOUND");
+
+    const second = `c-${unique()}`;
+    await call(app, "/api/learning/projects/1/containers", {
+      method: "POST",
+      headers: { "x-copilotkit-ei-service-token": SERVICE_TOKEN },
+      body: JSON.stringify({ id: second, name: "Second" }),
+    });
+    const assigned = await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({
+        runId: unique(),
+        userId: "u1",
+        agentId: "a1",
+        learningContainerId: second,
+      }),
+    });
+    expect(assigned.status).toBe(200);
+    const reread = await call(app, `/api/threads/${threadId}?userId=u1`);
+    expect(reread.body.thread.learningContainerIds.sort()).toEqual(
+      [containerId, second].sort(),
+    );
+    expect(reread.body.thread.learningContainerId).toBeNull();
+
+    const start = await call(app, `/api/v1/learning/containers/${containerId}/runs`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(start.status).toBe(501);
+    expect(start.body.error.code).toBe("LEARNING_ENGINE_UNAVAILABLE");
+
+    const inspector = await call(app, "/api/inspector/learning");
+    expect(inspector.status).toBe(200);
+    expect(inspector.body.schemaVersion).toBe(1);
+    expect(inspector.body.skillsPage.total).toBe(0);
   });
 
   test("a delivery file uploads and hydrates back", async () => {

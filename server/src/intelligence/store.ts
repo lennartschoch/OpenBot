@@ -205,6 +205,7 @@ export class IntelligenceStore {
     userId: string;
     agentId: string;
     name?: string;
+    learningContainerId?: string;
   }) {
     const [row] = await this.db
       .insert(intelligenceThreads)
@@ -213,6 +214,9 @@ export class IntelligenceStore {
         userId: input.userId,
         agentId: input.agentId,
         name: input.name ?? null,
+        learningContainerIds: input.learningContainerId
+          ? [input.learningContainerId]
+          : [],
       })
       .onConflictDoNothing()
       .returning();
@@ -800,6 +804,31 @@ export class IntelligenceStore {
 
   async listContainers() {
     return this.db.select().from(intelligenceLearningContainers);
+  }
+
+  async containerExists(containerId: string): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: intelligenceLearningContainers.id })
+      .from(intelligenceLearningContainers)
+      .where(eq(intelligenceLearningContainers.id, containerId))
+      .limit(1);
+    return Boolean(row);
+  }
+
+  /** Record a run's Learning Container on the thread, keeping earlier memberships. */
+  async assignLearningContainer(
+    threadId: string,
+    containerId: string,
+  ): Promise<void> {
+    await this.db
+      .update(intelligenceThreads)
+      .set({
+        learningContainerIds: sql`(
+          select array_agg(distinct member)
+          from unnest(array_append(${intelligenceThreads.learningContainerIds}, ${containerId})) as member
+        )`,
+      })
+      .where(eq(intelligenceThreads.id, threadId));
   }
 
   /** Create a Learning Container with the project service token; idempotent. */
