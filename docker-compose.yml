@@ -131,8 +131,8 @@ services:
       # already right. The picked harness's path, a model endpoint on the host, and Intelligence.
       PICKED_HARNESS_URL: ${PICKED_HARNESS_CONTAINER_URL:-${PICKED_HARNESS_URL:-}}
       OPENAI_BASE_URL: ${OPENAI_CONTAINER_BASE_URL:-${OPENAI_BASE_URL:-}}
-      INTELLIGENCE_API_URL: ${INTELLIGENCE_CONTAINER_API_URL:-${INTELLIGENCE_API_URL:-}}
-      INTELLIGENCE_GATEWAY_WS_URL: ${INTELLIGENCE_CONTAINER_GATEWAY_WS_URL:-${INTELLIGENCE_GATEWAY_WS_URL:-}}
+      INTELLIGENCE_API_URL: ${INTELLIGENCE_CONTAINER_API_URL:-http://server:${SERVER_PORT:-3001}/api/intelligence}
+      INTELLIGENCE_GATEWAY_WS_URL: ${INTELLIGENCE_CONTAINER_GATEWAY_WS_URL:-ws://server:${SERVER_PORT:-3001}/api/intelligence-gateway}
       # The browser opens the gateway too, at the address the server gives it in `/info`, and the
       # browser is on the host. So it gets the deployment's own address, the one a host server would
       # have used, whatever this container uses itself.
@@ -148,7 +148,7 @@ services:
       MANAGED_AGENT_TOKEN: ${MANAGED_AGENT_TOKEN:-}
       SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN:-openbot-dev-supervisor-token}
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:-openbot-dev-worker-secret}
-      INTELLIGENCE_API_KEY: ${INTELLIGENCE_API_KEY:-}
+      INTELLIGENCE_API_KEY: ${INTELLIGENCE_API_KEY:-${CPK_INTELLIGENCE_API_KEY:-local-intelligence}}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}

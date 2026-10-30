@@ -20,10 +20,14 @@ bash scripts/start.sh
 | ----------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `DATABASE_URL`                | PostgreSQL connection string.                                                                         |
 | `KEY_ENCRYPTION_KEY`          | Base64-encoded 32-byte key for encrypted stored credentials. Generate with `openssl rand -base64 32`. |
-| `INTELLIGENCE_API_URL`        | CopilotKit Intelligence API URL.                                                                      |
-| `INTELLIGENCE_GATEWAY_WS_URL` | CopilotKit Intelligence realtime gateway URL.                                                         |
-| `CPK_INTELLIGENCE_API_KEY` | Runtime key written by the CopilotKit CLI. Preferred when non-empty. |
+| `INTELLIGENCE_API_URL`        | Intelligence platform API URL. Defaults to this server's own `/api/intelligence`.                     |
+| `INTELLIGENCE_GATEWAY_WS_URL` | Intelligence realtime gateway URL. Defaults to this server's own `/api/intelligence-gateway`.        |
+| `CPK_INTELLIGENCE_API_KEY` | Key the server presents to the platform. Any non-empty value is accepted by the built-in platform. |
 | `INTELLIGENCE_API_KEY` | Legacy runtime key; used when `CPK_INTELLIGENCE_API_KEY` is empty or absent. |
+
+In this fork the Intelligence platform is built into the server: one process, the same Postgres.
+The defaults above need no account and no second container; the values shown in `.env.example`
+point at the server itself.
 
 All five above stop server startup if missing. The three `INTELLIGENCE_` values are additionally
 checked as a set, so a partial set is refused as a misconfiguration rather than treated as

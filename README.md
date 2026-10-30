@@ -65,7 +65,8 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 
 - Docker, for PostgreSQL and the shipped Bots.
 - [Bun](https://bun.sh) 1.4+, for the app, the API server and the tests (some tests fail on 1.3).
-- A CopilotKit Intelligence project and license. A free plan is available, and Intelligence can be self-hosted.
+- A CopilotKit Intelligence project and license. This fork ships the Intelligence platform inside
+  the server — one process, the same Postgres — so the defaults in `.env.example` need no account.
 - A model key. The proof-of-concept Bot uses OpenAI; the LangGraph Bot can use OpenAI, Anthropic, or Google.
 
 ## Quick start
@@ -83,38 +84,19 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
    bun install
    ```
 
-2. Connect a fresh managed Intelligence project:
-
-   ```sh
-   npx --yes copilotkit@latest login
-   npx --yes copilotkit@latest project select
-   bun scripts/setup-learning.ts
-   ```
-
-   The helper provisions the selected project's runtime key, creates or reuses its
-   `openbot` Learning container, then writes both settings to `.env`. It preserves
-   custom container assignments and never replaces an existing OpenBot key; with one
-   set, it only creates `openbot` in that key's project if it is missing.
-   For fresh self-hosted setup, set `INTELLIGENCE_API_URL` to that deployment's
-   HTTPS API origin (or `http://localhost` for a local one) and run the helper
-   without the two `npx` commands. It opens an isolated Chrome or Edge window for
-   your usual sign-in and project choice; install either browser first. For CLI-managed
-   local evaluation installs, it discovers the matching dashboard with the newest installed or
-   cached CopilotKit CLI and uses that dashboard for login and session requests. Discovery
-   runs offline with Bun, without downloading the CLI or requiring `npx` on your PATH.
-   If no CLI is available, manually hosted deployments use their API origin for sign-in. Complete the local auth
-   approval shown in the browser when prompted. The runtime API URL stays unchanged. It writes
-   the API URL, the key and the container, not `INTELLIGENCE_GATEWAY_WS_URL`, so
-   set that one to the same deployment yourself. Once `openbot` exists, the server assigns it
-   as the default by itself unless [Admin → Automatic Learning](docs/automatic-learning.md)
-   has a saved setting.
-   Managed Intelligence needs no separate licence token.
+2. Intelligence is built in — the server's own `/api/intelligence` and `/api/intelligence-gateway`
+   are the defaults, and the `openbot` Learning container is created by the migrations. Nothing
+   to connect. (The upstream managed flow still works: `npx --yes copilotkit@latest login` +
+   `project select` + `bun scripts/setup-learning.ts` point `.env` at a CopilotKit project instead;
+   it provisions the runtime key and the `openbot` Learning container, and once `openbot` exists
+   the server assigns it as the default by itself unless [Admin → Automatic Learning](docs/automatic-learning.md)
+   has a saved setting. Managed Intelligence needs no separate licence token.)
 
 3. Fill the remaining required values:
 
    - `OPENAI_API_KEY`
 
-   Keep the managed Intelligence URLs from `.env.example` unless you run Intelligence yourself. The example `KEY_ENCRYPTION_KEY` is public and fine locally; generate your own with:
+   Keep the built-in Intelligence defaults from `.env.example` unless you point at a managed project. The example `KEY_ENCRYPTION_KEY` is public and fine locally; generate your own with:
 
    ```sh
    openssl rand -base64 32
@@ -134,19 +116,15 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 
 ### Intelligence on your own machine
 
-To try Intelligence on one Mac instead of the managed service, follow
-[Evaluate Intelligence locally](https://docs.copilotkit.ai/intelligence/self-hosting-local). The free
-[Developer plan](https://www.copilotkit.ai/pricing) qualifies. The local licence lasts 30 days and
-`npx copilotkit@latest local renew` renews it as often as you need, while your account is in good
-standing. It is a preview for macOS with Docker Desktop,
-not a production installation. Run its
-`npx copilotkit@latest local connect` from the OpenBot root, where `.env` is.
+This fork ships the Intelligence platform inside the server itself: threads, events, memories,
+Learning containers and the realtime gateway, all in the Postgres OpenBot already uses. The
+defaults in `.env.example` point at it and need no account.
 
-That command writes `INTELLIGENCE_API_URL`, `INTELLIGENCE_GATEWAY_WS_URL` and
-`CPK_INTELLIGENCE_API_KEY` to `.env`. OpenBot reads those settings directly; no key
-copying or renaming is needed. `INTELLIGENCE_API_KEY` remains supported for older
-configurations. When both are set, the non-empty CLI key takes precedence so
-reconnecting uses the new project's key.
+The managed service and the CLI's local evaluation stack both work as alternatives:
+`npx copilotkit@latest local connect` from the OpenBot root writes `INTELLIGENCE_API_URL`,
+`INTELLIGENCE_GATEWAY_WS_URL` and `CPK_INTELLIGENCE_API_KEY` to `.env`, and OpenBot reads those
+settings directly. `INTELLIGENCE_API_KEY` remains supported for older configurations; when both
+are set, the non-empty CLI key takes precedence.
 
 To give the Bots a Learning container on that stack, see
 [Automatic Learning](docs/automatic-learning.md).
