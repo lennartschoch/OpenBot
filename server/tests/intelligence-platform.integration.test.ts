@@ -1196,3 +1196,87 @@ describe("memory scope, grants and absorption", () => {
     expect(project.body.id).not.toBe(first.body.id);
   });
 });
+
+describe("event batch writes", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  test("two batches on one thread fold without losing either", async () => {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId: "u1", agentId: "a1" }),
+    });
+    const batch = (runId: string, suffix: string) => [
+      {
+        seq: 1,
+        payload: {
+          type: "RUN_STARTED",
+          threadId,
+          runId,
+          input: { messages: [{ id: `u-${suffix}`, role: "user", content: suffix }] },
+          metadata: { cpki_event_id: `e-${suffix}-1`, cpki_event_seq: 1 },
+        },
+      },
+      {
+        seq: 2,
+        payload: {
+          type: "TEXT_MESSAGE_START",
+          threadId,
+          runId,
+          messageId: `a-${suffix}`,
+          role: "assistant",
+          metadata: { cpki_event_id: `e-${suffix}-2`, cpki_event_seq: 2 },
+        },
+      },
+      {
+        seq: 3,
+        payload: {
+          type: "TEXT_MESSAGE_CONTENT",
+          threadId,
+          runId,
+          messageId: `a-${suffix}`,
+          delta: `answer ${suffix}`,
+          metadata: { cpki_event_id: `e-${suffix}-3`, cpki_event_seq: 3 },
+        },
+      },
+    ];
+    await Promise.all([
+      app.store.appendEvents(threadId, `run-${unique()}`, batch(`run-${unique()}`, "one")),
+      app.store.appendEvents(threadId, `run-${unique()}`, batch(`run-${unique()}`, "two")),
+    ]);
+    const messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
+    expect(messages.body.messages.map((message: any) => message.id).sort()).toEqual([
+      "a-one",
+      "a-two",
+      "u-one",
+      "u-two",
+    ]);
+  });
+
+  test("a batch is one insert and a replayed batch stores nothing new", async () => {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId: "u1", agentId: "a1" }),
+    });
+    const runId = `run-${unique()}`;
+    const events = Array.from({ length: 50 }, (_, index) => ({
+      seq: index + 1,
+      payload: {
+        type: "TEXT_MESSAGE_CONTENT",
+        threadId,
+        runId,
+        messageId: "a1",
+        delta: "x",
+        metadata: { cpki_event_id: `b-${runId}-${index + 1}`, cpki_event_seq: index + 1 },
+      },
+    }));
+    const first = await app.store.appendEvents(threadId, runId, events);
+    expect(first.events.length).toBe(50);
+    const replay = await app.store.appendEvents(threadId, runId, events);
+    expect(replay.events.length).toBe(0);
+    const inspect = await call(app, `/api/_inspect/threads/${threadId}/events`);
+    expect(inspect.body.events.length).toBe(50);
+  });
+});

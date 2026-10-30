@@ -273,55 +273,54 @@ export class IntelligenceStore {
   // ---- events and messages ------------------------------------------------
 
   /**
-   * One appended event, ordered by its per-run seq.
+   * One appended batch, ordered by its per-run seq.
    *
-   * The runner retries event pushes; insert is idempotent on `(run_id, seq)` so a
-   * replayed batch stores each event once and broadcasts them in seq order.
+   * The runner retries event pushes; the insert is idempotent on `(run_id, seq)`
+   * so a replayed batch stores each event once. The batch and the transcript it
+   * folds into are one transaction, and the thread row is locked first, so two
+   * batches cannot read the same messages and write over each other.
    */
   async appendEvents(
     threadId: string,
     runId: string,
     events: { seq: number; payload: Record<string, unknown> }[],
   ): Promise<{ ids: Map<number, string>; events: Record<string, unknown>[] }> {
-    const ids = new Map<number, string>();
-    const stored: Record<string, unknown>[] = [];
-    for (const event of events.sort((a, b) => a.seq - b.seq)) {
-      const [row] = await this.db
-        .insert(intelligenceThreadEvents)
-        .values({
-          threadId,
-          runId,
-          seq: event.seq,
-          event: event.payload as Record<string, unknown>,
-        })
-        .onConflictDoNothing()
-        .returning();
-      if (!row) {
-        const [existing] = await this.db
-          .select()
-          .from(intelligenceThreadEvents)
-          .where(
-            and(
-              eq(intelligenceThreadEvents.runId, runId),
-              eq(intelligenceThreadEvents.seq, event.seq),
-            ),
-          )
-          .limit(1);
-        if (existing) ids.set(event.seq, String(existing.id));
-        continue;
-      }
-      ids.set(event.seq, String(row.id));
-      stored.push(event.payload);
-    }
-    // The fold keeps the thread's transcript current for `GET …/messages`.
-    if (stored.length > 0) {
-      const thread = await this.getThread(threadId);
-      if (thread) {
+    const sorted = [...events].sort((a, b) => a.seq - b.seq);
+    return this.db.transaction(async (tx) => {
+      const [thread] = await tx
+        .select()
+        .from(intelligenceThreads)
+        .where(eq(intelligenceThreads.id, threadId))
+        .for("update")
+        .limit(1);
+      const inserted =
+        sorted.length === 0
+          ? []
+          : await tx
+              .insert(intelligenceThreadEvents)
+              .values(
+                sorted.map((event) => ({
+                  threadId,
+                  runId,
+                  seq: event.seq,
+                  event: event.payload as Record<string, unknown>,
+                })),
+              )
+              .onConflictDoNothing()
+              .returning({
+                id: intelligenceThreadEvents.id,
+                seq: intelligenceThreadEvents.seq,
+                event: intelligenceThreadEvents.event,
+              });
+      const stored = [...inserted]
+        .sort((a, b) => a.seq - b.seq)
+        .map((row) => row.event as Record<string, unknown>);
+      if (stored.length > 0 && thread) {
         const messages = foldEventsToMessages(
           (thread.messages ?? []) as never,
           stored as never,
         );
-        await this.db
+        await tx
           .update(intelligenceThreads)
           .set({
             messages: messages as never,
@@ -331,8 +330,11 @@ export class IntelligenceStore {
           })
           .where(eq(intelligenceThreads.id, threadId));
       }
-    }
-    return { ids, events: stored };
+      return {
+        ids: new Map(inserted.map((row) => [row.seq, String(row.id)])),
+        events: stored,
+      };
+    });
   }
 
   /** One inspector page of the thread's event log, and whether it was cut short. */
