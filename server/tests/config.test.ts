@@ -118,21 +118,45 @@ describe("deployment configuration", () => {
     expect(config.auth).toBeUndefined();
   });
 
-  // The product does not have a mode without Intelligence, so each of these is a refusal to boot
-  // rather than a degraded capability. Named individually because a deployment that sets three of
-  // four is the likeliest real mistake, and the message has to say which one is missing.
-  test.each([
-    "INTELLIGENCE_API_URL",
-    "INTELLIGENCE_GATEWAY_WS_URL",
-    "INTELLIGENCE_API_KEY",
-  ])("refuses to start when %s is missing", (name) => {
+  // The addresses default to the platform this server mounts itself, so a clone reaches a working
+  // deployment with nothing set. The key is the other half and does NOT default that way on a
+  // deployment with sign-in — see the placeholder cases below.
+  test("defaults both addresses to this server's own platform", () => {
     const environment: Record<string, string | undefined> = {
       ...baseEnvironment,
     };
-    delete environment[name];
+    delete environment.INTELLIGENCE_API_URL;
+    delete environment.INTELLIGENCE_GATEWAY_WS_URL;
 
-    expect(() => loadConfig(environment)).toThrow(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${name === "INTELLIGENCE_API_KEY" ? "CPK_INTELLIGENCE_API_KEY (or INTELLIGENCE_API_KEY)" : name}`,
+    const config = loadConfig({ ...environment, PORT: "4321" });
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.apiUrl).toBe(
+      "http://localhost:4321/api/intelligence",
+    );
+    expect(config.runtime.intelligence.gatewayWsUrl).toBe(
+      "ws://localhost:4321/api/intelligence-gateway",
+    );
+  });
+
+  // `PORT` and `SERVER_PORT` are two names for one thing, and the default address has to follow
+  // whichever one the deployment set — the earlier code read only `PORT`.
+  test("takes the default address from SERVER_PORT too", () => {
+    const environment: Record<string, string | undefined> = {
+      ...baseEnvironment,
+    };
+    delete environment.INTELLIGENCE_API_URL;
+    delete environment.INTELLIGENCE_GATEWAY_WS_URL;
+
+    const config = loadConfig({ ...environment, SERVER_PORT: "3101" });
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.runtime.intelligence.apiUrl).toBe(
+      "http://localhost:3101/api/intelligence",
     );
   });
 
@@ -199,7 +223,50 @@ describe("deployment configuration", () => {
     );
   });
 
-  test("refuses to start when Intelligence is absent entirely, rather than degrading", () => {
+  /*
+   * The platform key is the whole credential on the built-in platform: behind it every thread and
+   * memory route trusts the `x-cpki-user-id` header, so one key covers every person's
+   * conversations. `.env.example` ships a placeholder so a clone runs; a deployment that asks its
+   * own users to sign in must not still accept it.
+   */
+  test("refuses the placeholder platform key where the deployment has sign-in", () => {
+    const environment: Record<string, string | undefined> = {
+      ...baseEnvironment,
+    };
+    delete environment.INTELLIGENCE_API_KEY;
+    delete environment.CPK_INTELLIGENCE_API_KEY;
+
+    expect(() => loadConfig(environment)).toThrow(
+      "CPK_INTELLIGENCE_API_KEY is still the placeholder",
+    );
+  });
+
+  // The other shape: nothing here is authenticated, `singleUserAllowed` has already refused
+  // anywhere somebody else can reach it, and the placeholder key gives away what the deployment
+  // was giving away anyway.
+  test("accepts the placeholder platform key on a single-user deployment", () => {
+    const config = loadConfig({
+      DATABASE_URL: baseEnvironment.DATABASE_URL,
+      KEY_ENCRYPTION_KEY: baseEnvironment.KEY_ENCRYPTION_KEY,
+      MANAGED_AGENT_AG_UI_URL: baseEnvironment.MANAGED_AGENT_AG_UI_URL,
+      MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
+      OPENBOT_SINGLE_USER: "true",
+    });
+
+    if (config.runtime.mode !== "intelligence") {
+      throw new Error("expected the Intelligence runtime");
+    }
+    expect(config.singleUser).toBe(true);
+    expect(config.runtime.intelligence.apiKey).toBe("local-intelligence");
+    expect(config.runtime.intelligence.apiUrl).toBe(
+      "http://localhost:3001/api/intelligence",
+    );
+  });
+
+  // A deployment with neither Intelligence settings nor a sign-in has two things wrong with it.
+  // Intelligence no longer refuses first, because it now has defaults; the missing identity provider
+  // does, which is the earlier of the two and the one to fix first.
+  test("refuses a deployment with no Intelligence settings and no sign-in, as before", () => {
     expect(() =>
       loadConfig({
         DATABASE_URL: baseEnvironment.DATABASE_URL,
@@ -207,7 +274,7 @@ describe("deployment configuration", () => {
         MANAGED_AGENT_AG_UI_URL: baseEnvironment.MANAGED_AGENT_AG_UI_URL,
         MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
       }),
-    ).toThrow("CopilotKit Intelligence is required and is not configured");
+    ).toThrow("No identity provider is configured");
   });
 
   test("rejects incomplete OAuth client configuration", () => {

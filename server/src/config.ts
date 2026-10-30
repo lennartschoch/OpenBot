@@ -986,12 +986,44 @@ function oktaAuth(
 }
 
 /**
+ * The platform key `.env.example` ships so a fresh clone runs without setting anything.
+ *
+ * It is a credential, not a default: the built-in platform compares it exactly and then trusts the
+ * `x-cpki-user-id` header on every thread and memory route, which is how one key reads every
+ * person's conversations. {@link assertPlatformKeyNotPlaceholder} is what keeps it a laptop value.
+ */
+const PLATFORM_KEY_PLACEHOLDER = "local-intelligence";
+
+/**
+ * Refuse the shipped placeholder on a deployment whose own users sign in.
+ *
+ * The two shapes this platform serves are not the same risk. A single-user deployment has no
+ * sign-in at all and `singleUserAllowed` has already refused anywhere anybody else can reach it,
+ * so a public platform key gives away nothing the deployment was not already giving away. A
+ * deployment with a sign-in provider is the other shape: it asks each person to prove who they are
+ * and then hands their conversations and memories to whoever knows a constant that is in the
+ * repository.
+ *
+ * Not a warning, because a warning about the one credential is the kind people scroll past, and the
+ * fix — a random value — is one command.
+ */
+function assertPlatformKeyNotPlaceholder(
+  settings: { apiKey: string },
+  singleUser: boolean,
+): void {
+  if (settings.apiKey !== PLATFORM_KEY_PLACEHOLDER || singleUser) return;
+  throw new Error(
+    `CPK_INTELLIGENCE_API_KEY is still the placeholder "${PLATFORM_KEY_PLACEHOLDER}" that .env.example ships, and this deployment has sign-in. The key is the whole credential on the built-in Intelligence platform: it covers every person's threads and memories, so anybody who knows it reads them without signing in. Set CPK_INTELLIGENCE_API_KEY to a random value (openssl rand -hex 32), or run the deployment as OPENBOT_SINGLE_USER with no sign-in, where nothing it protects was closed in the first place.`,
+  );
+}
+
+/**
  * Resolve the Intelligence contract, or refuse to start.
  *
- * The three addressing values are required together. A partial set is the more dangerous shape than
- * none at all: it means somebody intended to configure Intelligence and got it wrong, so failing on
- * the partial set alone (as this did) let a completely unconfigured deployment through as if that
- * were a choice.
+ * The addresses default to this server's own `/api/intelligence` and `/api/intelligence-gateway`,
+ * where the built-in platform is mounted, so a fresh clone needs no external service. A deployment
+ * naming them points the runtime at another Intelligence, but the built-in platform stays mounted
+ * and the key below still guards it.
  *
  * COPILOTKIT_LICENSE_TOKEN IS NO LONGER ONE OF THEM. Managed Intelligence issues a single project
  * key and derives entitlement from it, and requiring a second credential here sent people hunting
@@ -1002,7 +1034,7 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
   // The local Intelligence platform: REST and Phoenix gateway mounted on this very
   // server (server/src/intelligence). A deployment overrides the addresses to point
   // at a self-hosted CopilotKit Intelligence; unset, OpenBot serves its own.
-  const port = Number(environment.PORT ?? 3001);
+  const port = serverPort(environment);
   const settings = {
     apiUrl:
       url(environment, "INTELLIGENCE_API_URL") ??
@@ -1010,7 +1042,7 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
     gatewayWsUrl:
       url(environment, "INTELLIGENCE_GATEWAY_WS_URL") ??
       `ws://localhost:${port}/api/intelligence-gateway`,
-    apiKey: intelligenceApiKey(environment) ?? "local-intelligence",
+    apiKey: intelligenceApiKey(environment) ?? PLATFORM_KEY_PLACEHOLDER,
     licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
   };
 
@@ -1400,6 +1432,16 @@ export function loadConfig(
     : undefined;
   const managedAgent = managedAgentConfig(environment);
   const githubApp = githubAppConfig(environment);
+  const runtime = runtimeCapabilities(environment);
+  /*
+   * The authority short-circuits this, and that ordering is load-bearing: a white-label
+   * deployment naming an external authority lets it win, and `singleUserAllowed` is never
+   * reached and so cannot refuse a combination that already resolves.
+   */
+  const singleUser =
+    !organizationAuthUrl &&
+    singleUserAllowed(environment, configuredAuthProviders(auth).length > 0);
+  assertPlatformKeyNotPlaceholder(runtime.intelligence, singleUser);
   const publicUrl = (
     optional(environment, "OPENBOT_PUBLIC_URL") ?? auth?.baseUrl
   )?.replace(/\/+$/, "");
@@ -1440,7 +1482,7 @@ export function loadConfig(
     )?.replace(/\/+$/, ""),
     tenantPackageDirectory:
       optional(environment, "TENANT_PACKAGE_DIR") ?? "../examples/fintech",
-    runtime: runtimeCapabilities(environment),
+    runtime,
     recorder: { extraExtensionIds: recorderExtraExtensionIds(environment) },
     learning: learningDefault(environment),
     learningAutoAssign: learningAutoAssignEnabled(environment),
@@ -1454,14 +1496,7 @@ export function loadConfig(
     oauth: { google },
     auth,
     ...(organizationAuthUrl ? { organizationAuthUrl } : {}),
-    /*
-     * The authority short-circuits this, and that ordering is load-bearing: a white-label
-     * deployment naming an external authority lets it win, and `singleUserAllowed` is never
-     * reached and so cannot refuse a combination that already resolves.
-     */
-    singleUser:
-      !organizationAuthUrl &&
-      singleUserAllowed(environment, configuredAuthProviders(auth).length > 0),
+    singleUser,
     accessibility: accessibilityEnabled(environment),
     generativeUi: generativeUiEnabled(environment),
     selfHostBanner: selfHostBannerEnabled(environment),
