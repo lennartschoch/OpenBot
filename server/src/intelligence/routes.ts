@@ -415,18 +415,17 @@ export function createIntelligenceRestRoutes(
   app.get("/api/inspector/metadata", (c) => c.body(null, 204));
 
   app.get("/api/_inspect/threads/:id/events", async (c) => {
-    const rows = await store.listEvents(c.req.param("id"));
+    const page = await store.listEventsPage(c.req.param("id"));
     return c.json({
-      events: rows.map((row) => row.event),
+      events: page.events,
       decodeErrorRowIds: [],
-      truncated: false,
+      truncated: page.truncated,
     });
   });
 
   app.get("/api/_inspect/threads/:id/state", async (c) => {
-    const rows = await store.listEvents(c.req.param("id"));
-    const state = foldState(rows.map((row) => row.event));
-    return c.json(state ?? { kind: "no-snapshot" });
+    const events = await store.listStateEvents(c.req.param("id"));
+    return c.json(foldState(events));
   });
 
   app.put("/connector/annotate/:clientEventId", async (c) => {

@@ -321,44 +321,84 @@ export class IntelligenceStore {
     return { ids, events: stored };
   }
 
-  /** The thread's event log, in replay order. */
-  async listEvents(threadId: string, limit = 1000) {
+  /** One inspector page of the thread's event log, and whether it was cut short. */
+  async listEventsPage(
+    threadId: string,
+    limit = 1000,
+  ): Promise<{ events: Record<string, unknown>[]; truncated: boolean }> {
     const rows = await this.db
       .select()
       .from(intelligenceThreadEvents)
       .where(eq(intelligenceThreadEvents.threadId, threadId))
       .orderBy(asc(intelligenceThreadEvents.id))
-      .limit(limit);
-    return rows;
+      .limit(limit + 1);
+    return {
+      events: rows
+        .slice(0, limit)
+        .map((row) => row.event as Record<string, unknown>),
+      truncated: rows.length > limit,
+    };
+  }
+
+  /** The state events only, which is all the state fold reads. */
+  async listStateEvents(threadId: string): Promise<Record<string, unknown>[]> {
+    const rows = await this.db
+      .select({ event: intelligenceThreadEvents.event })
+      .from(intelligenceThreadEvents)
+      .where(
+        and(
+          eq(intelligenceThreadEvents.threadId, threadId),
+          sql`${intelligenceThreadEvents.event}->>'type' in ('STATE_SNAPSHOT', 'STATE_DELTA')`,
+        ),
+      )
+      .orderBy(asc(intelligenceThreadEvents.id));
+    return rows.map((row) => row.event as Record<string, unknown>);
   }
 
   /**
    * The events a reconnecting client has not seen, keyed on the runner's
-   * `cpki_event_id` cursor (the durable id the client tracks). A cursor this
-   * log has not seen replays from the beginning, which is what a cold browser
-   * needs.
+   * `cpki_event_id` cursor (the durable id the client tracks).
+   *
+   * The cursor is resolved to its row and the page is read after it in SQL. The
+   * earlier version read the first 2000 events and looked for the cursor among
+   * them, so on a longer thread a recent cursor was never found and the oldest
+   * page was replayed instead. A cursor this log has never seen falls back to
+   * the whole log, which is what a browser whose history was rebuilt needs.
    */
   async listEventsAfter(
     threadId: string,
     cpkiEventId: string | null,
     limit = 2000,
   ): Promise<Record<string, unknown>[]> {
+    const eventOf = (row: typeof intelligenceThreadEvents.$inferSelect) =>
+      row.event as Record<string, unknown>;
+    let afterId = 0;
+    if (cpkiEventId) {
+      const [anchor] = await this.db
+        .select({ id: intelligenceThreadEvents.id })
+        .from(intelligenceThreadEvents)
+        .where(
+          and(
+            eq(intelligenceThreadEvents.threadId, threadId),
+            sql`${intelligenceThreadEvents.event}->'metadata'->>'cpki_event_id' = ${cpkiEventId}`,
+          ),
+        )
+        .orderBy(asc(intelligenceThreadEvents.id))
+        .limit(1);
+      if (anchor) afterId = anchor.id;
+    }
     const rows = await this.db
       .select()
       .from(intelligenceThreadEvents)
-      .where(eq(intelligenceThreadEvents.threadId, threadId))
+      .where(
+        and(
+          eq(intelligenceThreadEvents.threadId, threadId),
+          afterId > 0 ? gt(intelligenceThreadEvents.id, afterId) : undefined,
+        ),
+      )
       .orderBy(asc(intelligenceThreadEvents.id))
       .limit(limit);
-    const eventOf = (row: typeof intelligenceThreadEvents.$inferSelect) =>
-      row.event as Record<string, unknown>;
-    if (!cpkiEventId) return rows.map(eventOf);
-    const index = rows.findIndex(
-      (row) =>
-        (row.event as { metadata?: { cpki_event_id?: string } }).metadata
-          ?.cpki_event_id === cpkiEventId,
-    );
-    if (index < 0) return rows.map(eventOf);
-    return rows.slice(index + 1).map(eventOf);
+    return rows.map(eventOf);
   }
 
   /** Whether a run holds the thread right now, whether or not it has emitted an event. */

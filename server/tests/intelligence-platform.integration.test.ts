@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { createDatabase } from "../src/db/client";
+import { intelligenceThreadEvents } from "../src/db/schema/intelligence";
 import { createLocalIntelligence } from "../src/intelligence/index";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
@@ -860,5 +861,69 @@ describe("thread list pagination", () => {
     });
     const listed = await call(app, `/api/threads?userId=${userId}&agentId=a1`);
     expect(listed.body.threads[0].id).toBe(firstId);
+  });
+});
+
+describe("long-thread replay and inspector pages", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  test("a cursor near the end replays only what follows it", async () => {
+    const threadId = unique();
+    const userId = `long-${unique()}`;
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+    });
+
+    const database = createDatabase(testDatabaseUrl(), TEST_POOL);
+    const runId = `run-${unique()}`;
+    const rows = Array.from({ length: 2105 }, (_, index) => ({
+      threadId,
+      runId,
+      seq: index + 1,
+      event: {
+        type:
+          index + 1 === 1500
+            ? "STATE_SNAPSHOT"
+            : index + 1 === 2000
+              ? "STATE_DELTA"
+              : "TEXT_MESSAGE_CONTENT",
+        ...(index + 1 === 1500 ? { snapshot: { count: 1 } } : {}),
+        ...(index + 1 === 2000
+          ? { delta: [{ op: "add", path: "/count", value: 2 }] }
+          : {}),
+        metadata: {
+          cpki_event_id: `bulk-${index + 1}`,
+          cpki_event_seq: index + 1,
+        },
+      },
+    }));
+    await database.insert(intelligenceThreadEvents).values(rows);
+
+    const after = await app.store.listEventsAfter(threadId, "bulk-1500");
+    expect(after.length).toBe(605);
+    expect(
+      (after[0].metadata as { cpki_event_id: string }).cpki_event_id,
+    ).toBe("bulk-1501");
+    expect(
+      (after.at(-1)!.metadata as { cpki_event_id: string }).cpki_event_id,
+    ).toBe("bulk-2105");
+
+    const inspector = await call(app, `/api/_inspect/threads/${threadId}/events`);
+    expect(inspector.body.events.length).toBe(1000);
+    expect(inspector.body.truncated).toBe(true);
+
+    const state = await call(app, `/api/_inspect/threads/${threadId}/state`);
+    expect(state.body).toEqual({
+      kind: "snapshot",
+      state: { count: 2 },
+      skippedDeltas: 0,
+    });
+
+    await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId, agentId: "a1" }),
+    });
   });
 });
