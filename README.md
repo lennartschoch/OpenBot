@@ -144,10 +144,11 @@ One image carries the app, the API, the browser the Bots drive, and optionally P
 `.env`, no Kubernetes.
 
 ```sh
-# The published image. Nothing to clone and nothing to build.
+# The image this fork publishes. Upstream's image does not carry the built-in platform: it is
+# built from upstream, which talks to CopilotKit's hosted services.
 docker run -p 3001:3001 --env-file .env \
   -e EMBEDDED_POSTGRES=on -v openbot-data:/var/lib/postgresql \
-  ghcr.io/copilotkit/openbot:latest
+  ghcr.io/lennartschoch/openbot:latest
 
 # Or the tree you have in front of you.
 docker build -t openbot .
@@ -156,9 +157,26 @@ docker run -p 3001:3001 --env-file .env \
 ```
 
 Everything is on 3001 here, the app included, rather than the 3010 the clone uses. `latest` is the
-most recent release and a version tag such as `:v0.0.9` pins one.
+most recent release and a version tag such as `:v0.2.0` pins one.
 
 Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you already run.
+
+**Reaching it from another machine.** The default Intelligence addresses are the server's own
+`localhost`, which is right when the browser runs on the same machine as the server and wrong the
+moment it does not. The symptom is quiet rather than loud: the page loads, a message sends, and no
+reply ever streams. The browser is told where the realtime gateway is in `/info`, so name the address
+the browser can reach:
+
+```sh
+INTELLIGENCE_GATEWAY_WS_URL=wss://openbot.example.com/api/intelligence-gateway
+```
+
+Use `wss`, not `ws`, whenever the page is served over https — a plain `ws` socket is blocked as
+mixed content. Compose passes this value to the browser as well as to the server, so one line covers
+both; leave `INTELLIGENCE_API_URL` alone, since only the server dials that one. A deployment on a
+private network with no TLS can avoid the whole question: `ssh -L 3001:localhost:3001 the-server` and
+open `http://localhost:3001`, where the default already works.
+
 [docs/deployment.md](docs/deployment.md) has the minimum sizes, the platform notes, and how it behaves behind more than one replica.
 
 ## Try it
