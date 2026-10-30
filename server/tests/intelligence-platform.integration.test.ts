@@ -1055,3 +1055,144 @@ describe("long-thread replay and inspector pages", () => {
     });
   });
 });
+
+describe("memory scope, grants and absorption", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  test("a grant that excludes project scope cannot read or write it", async () => {
+    const user = `grant-${unique()}`;
+    const userHeaders = { "x-cpki-user-id": user };
+    const grant = { user: "read-write", project: "none" };
+    const grantHeaders = {
+      ...userHeaders,
+      "x-cpki-memory-grant": JSON.stringify(grant),
+    };
+
+    await call(app, "/api/memories", {
+      method: "POST",
+      headers: userHeaders,
+      body: JSON.stringify({
+        content: "Vacation policy allows 30 days",
+        kind: "topical",
+        scope: "project",
+      }),
+    });
+    await call(app, "/api/memories", {
+      method: "POST",
+      headers: userHeaders,
+      body: JSON.stringify({
+        content: "Ada prefers concise reports",
+        kind: "topical",
+        scope: "user",
+      }),
+    });
+
+    const listWithGrant = await call(app, "/api/memories", {
+      headers: grantHeaders,
+    });
+    expect(
+      listWithGrant.body.memories.every((memory: any) => memory.scope === "user"),
+    ).toBe(true);
+
+    const recallUser = await call(app, "/api/memories/recall", {
+      method: "POST",
+      headers: grantHeaders,
+      body: JSON.stringify({ query: "vacation", scope: "user" }),
+    });
+    expect(recallUser.body.memories).toEqual([]);
+
+    const recallProject = await call(app, "/api/memories/recall", {
+      method: "POST",
+      headers: grantHeaders,
+      body: JSON.stringify({ query: "vacation", scope: "project" }),
+    });
+    expect(recallProject.status).toBe(403);
+    expect(recallProject.body.error.code).toBe("MEMORY_NOT_ENTITLED");
+
+    const createProject = await call(app, "/api/memories", {
+      method: "POST",
+      headers: grantHeaders,
+      body: JSON.stringify({
+        content: "Another project fact",
+        kind: "topical",
+        scope: "project",
+      }),
+    });
+    expect(createProject.status).toBe(403);
+
+    const project = (
+      await call(app, "/api/memories", { headers: userHeaders })
+    ).body.memories.find((memory: any) => memory.scope === "project");
+    const patchProject = await call(app, `/api/memories/${project.id}`, {
+      method: "PATCH",
+      headers: grantHeaders,
+      body: JSON.stringify({ content: "Changed", kind: "topical" }),
+    });
+    expect(patchProject.status).toBe(403);
+  });
+
+  test("supersede keeps the scope and sources the caller left out", async () => {
+    const user = `scope-${unique()}`;
+    const headers = { "x-cpki-user-id": user };
+    const created = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: "Vacation policy allows 30 days",
+        kind: "topical",
+        scope: "project",
+        sourceThreadIds: ["thread-a"],
+      }),
+    });
+    const replaced = await call(app, `/api/memories/${created.body.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ content: "Vacation policy allows 25 days" }),
+    });
+    expect(replaced.status).toBe(200);
+    expect(replaced.body.scope).toBe("project");
+    expect(replaced.body.kind).toBe("topical");
+    expect(replaced.body.sourceThreadIds).toEqual(["thread-a"]);
+  });
+
+  test("near-duplicates absorb on normalised content and merge their sources", async () => {
+    const user = `absorb-${unique()}`;
+    const headers = { "x-cpki-user-id": user };
+    const first = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: "Ada prefers concise reports",
+        kind: "topical",
+        scope: "user",
+        sourceThreadIds: ["thread-a"],
+      }),
+    });
+    const second = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: "  Ada   PREFERS concise reports.  ",
+        kind: "topical",
+        scope: "user",
+        sourceThreadIds: ["thread-b"],
+      }),
+    });
+    expect(second.body.absorbed).toBe(true);
+    expect(second.body.id).toBe(first.body.id);
+    expect(second.body.sourceThreadIds.sort()).toEqual(["thread-a", "thread-b"]);
+
+    const project = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: "Ada prefers concise reports",
+        kind: "topical",
+        scope: "project",
+      }),
+    });
+    expect(project.body.absorbed).toBe(false);
+    expect(project.body.id).not.toBe(first.body.id);
+  });
+});

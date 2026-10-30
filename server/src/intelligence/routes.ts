@@ -331,9 +331,13 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const grant = memoryGrant(c);
+    const scope = scopeForGrant(grant);
+    if (scope === "none") return memoryDenied(c);
     const rows = await store.listMemories(
       userId,
       c.req.query("includeInvalidated") === "true",
+      scope,
     );
     return c.json({ memories: rows.map((r) => memory(r)) });
   });
@@ -348,11 +352,13 @@ export function createIntelligenceRestRoutes(
       scope?: string;
       sourceThreadIds?: string[];
     }>();
+    const scope = body.scope ?? "user";
+    if (!grantAllows(memoryGrant(c), scope)) return memoryDenied(c);
     const { row, absorbed } = await store.createMemory({
       userId,
       content: body.content,
       kind: body.kind,
-      scope: body.scope ?? "user",
+      scope,
       sourceThreadIds: body.sourceThreadIds ?? [],
     });
     deps.meta?.memories(userId, memoryDelta("upserted", memory(row) as never));
@@ -369,13 +375,17 @@ export function createIntelligenceRestRoutes(
       scope?: string;
       sourceThreadIds?: string[];
     }>();
+    const current = await store.getMemory(c.req.param("id"), userId);
+    if (!current) return notFound(c);
+    const grant = memoryGrant(c);
+    if (!grantAllows(grant, body.scope ?? current.scope)) return memoryDenied(c);
     const result = await store.supersedeMemory({
       id: c.req.param("id"),
       userId,
       content: body.content,
       kind: body.kind,
-      scope: body.scope ?? "user",
-      sourceThreadIds: body.sourceThreadIds ?? [],
+      scope: body.scope,
+      sourceThreadIds: body.sourceThreadIds,
     });
     if (!result)
       return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
@@ -390,9 +400,11 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const current = await store.getMemory(c.req.param("id"), userId);
+    if (!current) return notFound(c);
+    if (!grantAllows(memoryGrant(c), current.scope)) return memoryDenied(c);
     const row = await store.retireMemory(c.req.param("id"), userId);
-    if (!row)
-      return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+    if (!row) return notFound(c);
     deps.meta?.memories(
       userId,
       memoryDelta("invalidated", memory(row) as never),
@@ -405,7 +417,16 @@ export function createIntelligenceRestRoutes(
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
     const body = await c.req.json<{ query: string; limit?: number; scope?: string }>();
-    const rows = await store.recallMemories(userId, body.query, body.limit ?? 10);
+    const grant = memoryGrant(c);
+    const scope =
+      body.scope ?? (grant && !grantAllows(grant, "project") ? "user" : undefined);
+    if (scope && !grantAllows(grant, scope)) return memoryDenied(c);
+    const rows = await store.recallMemories(
+      userId,
+      body.query,
+      body.limit ?? 10,
+      scope,
+    );
     return c.json({
       memories: rows.map(({ row, score }) => memory(row, Number(score))),
     });
@@ -701,6 +722,49 @@ const memory = toMemorySummary;
 /** Another person's thread (or a thread that is not there) is the same 404. */
 function notFound(c: { json: (body: unknown, status: 404) => Response }) {
   return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+}
+
+type MemoryGrant = { user?: string; project?: string };
+
+function memoryGrant(c: {
+  req: { header: (name: string) => string | undefined };
+}): MemoryGrant | undefined {
+  const raw = c.req.header("x-cpki-memory-grant");
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { user?: unknown; project?: unknown };
+    return {
+      user: typeof parsed.user === "string" ? parsed.user : undefined,
+      project: typeof parsed.project === "string" ? parsed.project : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A scope is allowed when the immutable grant names read or read-write for it. */
+function grantAllows(grant: MemoryGrant | undefined, scope: string): boolean {
+  if (!grant) return true;
+  const value = scope === "project" ? grant.project : grant.user;
+  return value === "read" || value === "read-write";
+}
+
+/** The one scope a list may read when the grant allows only one; "none" for neither. */
+function scopeForGrant(grant: MemoryGrant | undefined): string | undefined {
+  if (!grant) return undefined;
+  const user = grantAllows(grant, "user");
+  const project = grantAllows(grant, "project");
+  if (user && !project) return "user";
+  if (!user && project) return "project";
+  if (!user && !project) return "none";
+  return undefined;
+}
+
+function memoryDenied(c: { json: (body: unknown, status: 403) => Response }) {
+  return c.json(
+    { error: { code: "MEMORY_NOT_ENTITLED", retryable: false } },
+    403,
+  );
 }
 
 /** Compare two secrets without an early exit that leaks their common prefix. */

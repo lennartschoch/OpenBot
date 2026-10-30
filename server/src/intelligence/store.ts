@@ -105,6 +105,16 @@ export function toMemorySummary(row: MemoryRow, score?: number) {
   };
 }
 
+/** A memory's identity for near-duplicate absorption, not its stored text. */
+function memoryKey(content: string): string {
+  return content
+    .trim()
+    .toLowerCase()
+    .replace(/[\s]+/g, " ")
+    .replace(/[.!?;:,]+$/g, "")
+    .trim();
+}
+
 const JOIN_TOKEN_TTL_MS = 60 * 60_000;
 /** The hosted platform answers every lock acquisition with this TTL, whatever was asked. */
 const LOCK_TTL_SECONDS = 120;
@@ -669,7 +679,11 @@ export class IntelligenceStore {
 
   // ---- memories -----------------------------------------------------------
 
-  async listMemories(userId: string, includeInvalidated = false) {
+  async listMemories(
+    userId: string,
+    includeInvalidated = false,
+    scope?: string,
+  ) {
     const rows = await this.db
       .select()
       .from(intelligenceMemories)
@@ -677,6 +691,7 @@ export class IntelligenceStore {
         and(
           eq(intelligenceMemories.userId, userId),
           ...(includeInvalidated ? [] : [isNull(intelligenceMemories.invalidatedAt)]),
+          ...(scope ? [eq(intelligenceMemories.scope, scope)] : []),
         ),
       )
       .orderBy(desc(intelligenceMemories.createdAt))
@@ -691,20 +706,35 @@ export class IntelligenceStore {
     scope: string;
     sourceThreadIds: string[];
   }) {
-    // Near-duplicate absorption: the hosted platform's create can merge into an
-    // existing row; exact-content match is the whole contract OpenBot relies on.
-    const [existing] = await this.db
+    // Near-duplicate absorption. Hosted merges a near-duplicate into the row it
+    // already holds; without an embedding pipeline, the closest local answer is
+    // a normalised content comparison (case, whitespace, trailing punctuation).
+    // The candidate set is one person's live rows, which the list endpoint caps
+    // at 200, so this stays a small read.
+    const key = memoryKey(input.content);
+    const candidates = await this.db
       .select()
       .from(intelligenceMemories)
       .where(
         and(
           eq(intelligenceMemories.userId, input.userId),
-          eq(intelligenceMemories.content, input.content),
+          eq(intelligenceMemories.scope, input.scope),
           isNull(intelligenceMemories.invalidatedAt),
         ),
-      )
-      .limit(1);
+      );
+    const existing = candidates.find((row) => memoryKey(row.content) === key);
     if (existing) {
+      const sourceThreadIds = [
+        ...new Set([...existing.sourceThreadIds, ...input.sourceThreadIds]),
+      ];
+      if (sourceThreadIds.length !== existing.sourceThreadIds.length) {
+        const [updated] = await this.db
+          .update(intelligenceMemories)
+          .set({ sourceThreadIds, updatedAt: new Date() })
+          .where(eq(intelligenceMemories.id, existing.id))
+          .returning();
+        return { row: updated ?? existing, absorbed: true } as const;
+      }
       return { row: existing, absorbed: true } as const;
     }
     const [row] = await this.db
@@ -721,16 +751,47 @@ export class IntelligenceStore {
     return { row, absorbed: false } as const;
   }
 
-  /** Retire `id` and insert `content` as its successor, atomically. */
+  /**
+   * Retire `id` and insert `content` as its successor, atomically. Fields the
+   * caller omitted are carried from the retired row: a caller that changes only
+   * the content must not silently turn a project memory into a private one.
+   */
+  /** One memory the person owns, live or retired. */
+  async getMemory(id: string, userId: string) {
+    const [row] = await this.db
+      .select()
+      .from(intelligenceMemories)
+      .where(
+        and(
+          eq(intelligenceMemories.id, id),
+          eq(intelligenceMemories.userId, userId),
+        ),
+      )
+      .limit(1);
+    return row;
+  }
+
   async supersedeMemory(input: {
     id: string;
     userId: string;
     content: string;
-    kind: string;
-    scope: string;
-    sourceThreadIds: string[];
+    kind?: string;
+    scope?: string;
+    sourceThreadIds?: string[];
   }) {
     return this.db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(intelligenceMemories)
+        .where(
+          and(
+            eq(intelligenceMemories.id, input.id),
+            eq(intelligenceMemories.userId, input.userId),
+            isNull(intelligenceMemories.invalidatedAt),
+          ),
+        )
+        .limit(1);
+      if (!current) return undefined;
       const [retired] = await tx
         .update(intelligenceMemories)
         .set({ invalidatedAt: new Date() })
@@ -748,10 +809,10 @@ export class IntelligenceStore {
         .values({
           id: randomUUID(),
           userId: input.userId,
-          kind: input.kind,
-          scope: input.scope,
+          kind: input.kind ?? current.kind,
+          scope: input.scope ?? current.scope,
           content: input.content,
-          sourceThreadIds: input.sourceThreadIds,
+          sourceThreadIds: input.sourceThreadIds ?? current.sourceThreadIds,
         })
         .returning();
       return { retiredId: retired.id, row: created };
@@ -778,7 +839,12 @@ export class IntelligenceStore {
    * intersected with a trigram-free containment pass so short queries that miss the
    * tsvector config still find their rows.
    */
-  async recallMemories(userId: string, query: string, limit: number) {
+  async recallMemories(
+    userId: string,
+    query: string,
+    limit: number,
+    scope?: string,
+  ) {
     const rows = await this.db
       .select({
         row: intelligenceMemories,
@@ -789,6 +855,7 @@ export class IntelligenceStore {
         and(
           eq(intelligenceMemories.userId, userId),
           isNull(intelligenceMemories.invalidatedAt),
+          ...(scope ? [eq(intelligenceMemories.scope, scope)] : []),
           or(
             sql`to_tsvector('english', ${intelligenceMemories.content}) @@ plainto_tsquery('english', ${query})`,
             sql`lower(${intelligenceMemories.content}) LIKE '%' || lower(${query}) || '%'`,
