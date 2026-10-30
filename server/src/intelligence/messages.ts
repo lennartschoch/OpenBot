@@ -73,12 +73,28 @@ export function foldEventsToMessages(
   for (const event of events) {
     switch (event.type) {
       case EventType.RUN_STARTED: {
-        // A run's input carries the conversation it started from: seed from it so
-        // a thread whose history was written by another client (or an earlier
-        // deployment) folds completely.
-        if (Array.isArray(event.input?.messages)) {
-          messages = [...event.input.messages];
-          reindex();
+        // A run's input carries the conversation it started from. Merge it in
+        // rather than replacing the transcript: the hosted platform appends the
+        // input, and a run that starts from a partial (or empty) transcript —
+        // a routine, a retry, a client whose restored history dropped a turn —
+        // must not erase what the thread already holds. An id seen before is
+        // replaced in place, so an input that repeats history keeps its order.
+        const input = event.input?.messages;
+        if (Array.isArray(input)) {
+          for (const message of input) {
+            if (!message || typeof message.id !== "string") {
+              messages = [...messages, message as FoldMessage];
+              continue;
+            }
+            const at = indexById.get(message.id);
+            if (at === undefined) {
+              messages = [...messages, message];
+              indexById.set(message.id, messages.length - 1);
+            } else {
+              messages = [...messages];
+              messages[at] = message;
+            }
+          }
         }
         break;
       }

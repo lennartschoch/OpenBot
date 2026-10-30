@@ -345,13 +345,175 @@ describe("the gateway relays between planes", () => {
 });
 
 /** A socket the gateway can drive, recording what it sends. */
-function captureSocket() {
+function captureSocket(options: {
+  phoenix?: "runner" | "client" | "channels";
+  joinToken?: string;
+} = {}) {
   const frames: string[] = [];
   const socket = {
-    data: { phoenix: "runner", joined: new Map<string, string | null>() },
+    data: {
+      phoenix: options.phoenix ?? "runner",
+      joined: new Map<string, string | null>(),
+      streamModes: new Map<string, string | undefined>(),
+      joinToken: options.joinToken,
+    },
     send: (data: string) => void frames.push(data),
     close: () => {},
     frames,
   };
   return socket as typeof socket & { frames: string[] };
 }
+
+describe("the hosted realtime control contract", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const framesOf = (socket: ReturnType<typeof captureSocket>, event: string) =>
+    socket.frames
+      .map((frame) => JSON.parse(frame) as [unknown, unknown, string, string, any])
+      .filter((frame) => frame[3] === event);
+
+  async function thread(userId = "u1") {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+    });
+    return threadId;
+  }
+
+  function join(
+    socket: ReturnType<typeof captureSocket>,
+    topic: string,
+    params: Record<string, unknown>,
+  ) {
+    app.gateway.handle(
+      socket,
+      JSON.stringify([null, "1", topic, "phx_join", params]),
+    );
+  }
+
+  test("a run join replays no history", async () => {
+    const threadId = await thread();
+    const runId = `run-${unique()}`;
+    await app.store.appendEvents(threadId, runId, [
+      { seq: 1, payload: { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "h1", cpki_event_seq: 1 } } },
+      { seq: 2, payload: { type: "RUN_FINISHED", threadId, runId, metadata: { cpki_event_id: "h2", cpki_event_seq: 2 } } },
+    ]);
+    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
+    join(client, `thread:${threadId}`, { stream_mode: "run", run_id: runId });
+    await wait(150);
+    expect(framesOf(client, "ag_ui_event")).toEqual([]);
+    expect(framesOf(client, "replay_complete")).toEqual([]);
+    expect(framesOf(client, "stream_idle")).toEqual([]);
+  });
+
+  test("connect does not idle a run that has not emitted an event yet", async () => {
+    const threadId = await thread();
+    const runId = `run-${unique()}`;
+    await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId, userId: "u1", agentId: "a1" }),
+    });
+    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
+    join(client, `thread:${threadId}`, { stream_mode: "connect", last_seen_event_id: null });
+    await wait(150);
+    expect(framesOf(client, "replay_complete").length).toBe(1);
+    expect(framesOf(client, "stream_idle")).toEqual([]);
+
+    const runner = captureSocket();
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "1", `ingestion:${runId}`, "phx_join", { thread_id: threadId, run_id: runId }]),
+    );
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "2", `ingestion:${runId}`, "events", {
+        events: [
+          { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "i1", cpki_event_seq: 1 } },
+          { type: "RUN_FINISHED", threadId, runId, metadata: { cpki_event_id: "i2", cpki_event_seq: 2 } },
+        ],
+      }]),
+    );
+    await wait(400);
+    const idle = framesOf(client, "stream_idle");
+    expect(idle.length).toBe(1);
+    expect(idle[0][4].latestEventId).toBe("i2");
+  });
+
+  test("an idle thread replays and then idles", async () => {
+    const threadId = await thread();
+    const runId = `run-${unique()}`;
+    await app.store.appendEvents(threadId, runId, [
+      { seq: 1, payload: { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "j1", cpki_event_seq: 1 } } },
+    ]);
+    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
+    join(client, `thread:${threadId}`, { stream_mode: "connect", last_seen_event_id: null });
+    await wait(200);
+    expect(framesOf(client, "ag_ui_event").length).toBe(1);
+    expect(framesOf(client, "replay_complete").length).toBe(1);
+    expect(framesOf(client, "stream_idle").length).toBe(1);
+  });
+
+  test("RUN_STARTED merges the input into the transcript instead of replacing it", async () => {
+    const threadId = await thread();
+    const first = `run-${unique()}`;
+    await app.store.appendEvents(threadId, first, [
+      { seq: 1, payload: { type: "RUN_STARTED", threadId, runId: first, input: { messages: [{ id: "u1", role: "user", content: "one" }] }, metadata: { cpki_event_id: "k1", cpki_event_seq: 1 } } },
+      { seq: 2, payload: { type: "TEXT_MESSAGE_START", threadId, runId: first, messageId: "a1", role: "assistant", metadata: { cpki_event_id: "k2", cpki_event_seq: 2 } } },
+      { seq: 3, payload: { type: "TEXT_MESSAGE_CONTENT", threadId, runId: first, messageId: "a1", delta: "answer one", metadata: { cpki_event_id: "k3", cpki_event_seq: 3 } } },
+    ]);
+    let messages = await call(app, `/api/threads/${threadId}/messages`);
+    expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1"]);
+
+    const second = `run-${unique()}`;
+    await app.store.appendEvents(threadId, second, [
+      { seq: 1, payload: { type: "RUN_STARTED", threadId, runId: second, input: { messages: [{ id: "u2", role: "user", content: "two" }] }, metadata: { cpki_event_id: "l1", cpki_event_seq: 1 } } },
+      { seq: 2, payload: { type: "TEXT_MESSAGE_START", threadId, runId: second, messageId: "a2", role: "assistant", metadata: { cpki_event_id: "l2", cpki_event_seq: 2 } } },
+      { seq: 3, payload: { type: "TEXT_MESSAGE_CONTENT", threadId, runId: second, messageId: "a2", delta: "answer two", metadata: { cpki_event_id: "l3", cpki_event_seq: 3 } } },
+    ]);
+    messages = await call(app, `/api/threads/${threadId}/messages`);
+    expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
+
+    const third = `run-${unique()}`;
+    await app.store.appendEvents(threadId, third, [
+      { seq: 1, payload: { type: "RUN_STARTED", threadId, runId: third, input: { messages: [] }, metadata: { cpki_event_id: "m1", cpki_event_seq: 1 } } },
+    ]);
+    messages = await call(app, `/api/threads/${threadId}/messages`);
+    expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  test("run start and finish publish thread_run_activity", async () => {
+    const threadId = await thread();
+    const listed = await call(app, "/api/threads?userId=u1&agentId=a1");
+    const joinToken = listed.body.joinCode;
+    const meta = captureSocket({ phoenix: "client", joinToken });
+    join(meta, `user_meta:${joinToken}`, {});
+    await wait(50);
+
+    const runId = `run-${unique()}`;
+    const runner = captureSocket();
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "1", `ingestion:${runId}`, "phx_join", { thread_id: threadId, run_id: runId }]),
+    );
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "2", `ingestion:${runId}`, "events", {
+        events: [
+          { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "n1", cpki_event_seq: 1 } },
+          { type: "RUN_FINISHED", threadId, runId, metadata: { cpki_event_id: "n2", cpki_event_seq: 2 } },
+        ],
+      }]),
+    );
+    await wait(400);
+    const activity = framesOf(meta, "thread_run_activity");
+    expect(activity.map((frame) => frame[4].event_type)).toEqual(["RUN_STARTED", "RUN_FINISHED"]);
+    expect(activity[0][4].thread_id).toBe(threadId);
+    expect(activity[0][4].run_id).toBe(runId);
+  });
+});

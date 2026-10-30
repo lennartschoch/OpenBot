@@ -28,6 +28,8 @@ export type GatewaySocket = {
 export type PhoenixData = {
   phoenix: "runner" | "client" | "channels";
   joined: Map<string, string | null>;
+  /** The `stream_mode` each joined thread topic asked for, keyed by topic. */
+  streamModes?: Map<string, string | undefined>;
   /** The socket-level `join_token` the Phoenix client puts on the connect URL. */
   joinToken?: string;
   /** The runner plane's bearer key, carried as the socket's `token` param. */
@@ -72,6 +74,7 @@ export class IntelligenceGateway {
     return {
       phoenix: plane,
       joined: new Map(),
+      streamModes: new Map(),
       joinToken: clean(url.searchParams.get("join_token")),
       token: runnerToken,
       // The subprotocol the server echoes back: Phoenix clients announce
@@ -95,6 +98,7 @@ export class IntelligenceGateway {
         break;
       case "phx_leave":
         data.joined.delete(topic);
+        data.streamModes?.delete(topic);
         this.subscribers.get(topic)?.delete(ws);
         reply(ws, joinRef, ref, topic, {});
         break;
@@ -124,6 +128,7 @@ export class IntelligenceGateway {
       this.subscribers.get(topic)?.delete(ws);
     }
     data.joined.clear();
+    data.streamModes?.clear();
   }
 
   /** Push one event to every socket on a topic (the channel broadcast). */
@@ -205,6 +210,13 @@ export class IntelligenceGateway {
       }
     }
     data.joined.set(topic, joinRef);
+    if (topic.startsWith("thread:")) {
+      data.streamModes ??= new Map();
+      data.streamModes.set(
+        topic,
+        typeof params.stream_mode === "string" ? params.stream_mode : undefined,
+      );
+    }
     const set = this.subscribers.get(topic) ?? new Set<GatewaySocket>();
     set.add(ws);
     this.subscribers.set(topic, set);
@@ -217,9 +229,11 @@ export class IntelligenceGateway {
         : {};
     reply(ws, joinRef, ref, topic, response);
 
-    // A thread join replays the events after the caller's cursor, then says so
-    // (and idles the stream when no run is active to fill it).
-    if (topic.startsWith("thread:")) {
+    // A browser thread join replays the events after the caller's cursor, then
+    // says so (and idles the stream when no run is active to fill it). A run
+    // join replays nothing: the browser already holds the transcript, and a
+    // historical RUN_FINISHED would end the run that is about to start.
+    if (topic.startsWith("thread:") && data.phoenix === "client") {
       await this.replay(ws, topic.slice("thread:".length), params);
     }
   }
@@ -228,12 +242,17 @@ export class IntelligenceGateway {
    * Replay the events a joining client has not seen, then the control events:
    * `replay_complete` closes a client-initiated stream, `stream_idle` tells a
    * connect-mode subscriber there is no active run to wait for.
+   *
+   * A run join gets neither: the hosted gateway sends a run-mode subscriber no
+   * history and no control events, because the run it is waiting for has not
+   * produced any yet.
    */
   private async replay(
     ws: GatewaySocket,
     threadId: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (params.stream_mode === "run") return;
     const cursor =
       typeof params.last_seen_event_id === "string"
         ? params.last_seen_event_id
@@ -243,23 +262,16 @@ export class IntelligenceGateway {
       send(ws, `thread:${threadId}`, AG_UI_EVENT, row);
     }
     const latest = await this.store.latestEvent(threadId);
-    const frame = JSON.stringify([
-      null,
-      null,
-      `thread:${threadId}`,
-      REPLAY_COMPLETE_EVENT,
-      latest ? { latest_event_id: latest.cpkiEventId } : {},
-    ]);
-    ws.send(frame);
-    if (params.stream_mode === "connect" && !latest?.running) {
-      const idle = JSON.stringify([
-        null,
-        null,
-        `thread:${threadId}`,
-        STREAM_IDLE_EVENT,
-        latest ? { latest_event_id: latest.cpkiEventId } : {},
-      ]);
-      ws.send(idle);
+    const control = {
+      thread_id: threadId,
+      latestEventId: latest.cpkiEventId,
+    };
+    send(ws, `thread:${threadId}`, REPLAY_COMPLETE_EVENT, control);
+    // An active run has not gone idle just because it has no events yet. A
+    // subscriber that joined before the first event must keep waiting; the
+    // terminal event later tells it when the stream is idle.
+    if (!latest.running) {
+      send(ws, `thread:${threadId}`, STREAM_IDLE_EVENT, control);
     }
   }
 
@@ -309,9 +321,66 @@ export class IntelligenceGateway {
       this.broadcast(ingestionTopic, RUNNER_EVENT, event);
       this.broadcast(`thread:${threadId}`, AG_UI_EVENT, event);
     }
-    const finished = stored.some((event) => event.type === EventType.RUN_FINISHED);
-    if (finished) await this.store.markRunFinished(threadId, runId);
+    const thread = await this.store.getThread(threadId);
+    for (const event of stored) {
+      if (
+        event.type !== EventType.RUN_STARTED &&
+        event.type !== EventType.RUN_FINISHED &&
+        event.type !== EventType.RUN_ERROR
+      ) {
+        continue;
+      }
+      if (thread) {
+        const latest = await this.store.latestEvent(threadId);
+        await this.broadcastUser(thread.userId, "threads", "thread_run_activity", {
+          thread_id: threadId,
+          threadId,
+          agent_id: thread.agentId,
+          agentId: thread.agentId,
+          run_id: runId,
+          runId,
+          event_type: event.type,
+          eventType: event.type,
+          latest_event_id: latest.cpkiEventId,
+          latestEventId: latest.cpkiEventId,
+        });
+      }
+    }
+    const terminal = stored.some(
+      (event) =>
+        event.type === EventType.RUN_FINISHED ||
+        event.type === EventType.RUN_ERROR,
+    );
+    if (terminal) {
+      await this.store.markRunFinished(threadId, runId);
+      // A connect-mode subscriber waits for the run to end; this is the frame
+      // that tells it the wait is over. Hosted sends it after the terminal
+      // event, not at join time.
+      await this.sendStreamIdle(`thread:${threadId}`, threadId);
+    }
     reply(ws, joinRef, ref, ingestionTopic, {});
+  }
+
+  /** Tell every connect-mode subscriber on a thread topic that the run ended. */
+  private async sendStreamIdle(topic: string, threadId: string): Promise<void> {
+    const latest = await this.store.latestEvent(threadId);
+    const frame = JSON.stringify([
+      null,
+      null,
+      topic,
+      STREAM_IDLE_EVENT,
+      { thread_id: threadId, latestEventId: latest.cpkiEventId },
+    ]);
+    const sockets = this.subscribers.get(topic);
+    if (!sockets) return;
+    for (const socket of sockets) {
+      if (socket.data.streamModes?.get(topic) === "run") continue;
+      try {
+        socket.send(frame);
+      } catch {
+        sockets.delete(socket);
+      }
+    }
   }
 
   /**

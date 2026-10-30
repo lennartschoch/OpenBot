@@ -273,23 +273,34 @@ export class IntelligenceStore {
     return rows.slice(index + 1).map(eventOf);
   }
 
-  /** The newest event of the thread and whether its run is still active. */
+  /** Whether a run holds the thread right now, whether or not it has emitted an event. */
+  async isThreadRunning(threadId: string): Promise<boolean> {
+    const lock = await this.getLock(threadId);
+    return Boolean(lock && lock.expiresAt.getTime() > Date.now());
+  }
+
+  /**
+   * The newest event of the thread and whether its run is still active.
+   *
+   * `running` comes from the lock, not from the presence of an event: a run that
+   * has just been locked and has not produced its first event is running, and a
+   * stream that treated it as idle would close before the run said anything.
+   */
   async latestEvent(
     threadId: string,
-  ): Promise<{ cpkiEventId: string; running: boolean } | null> {
+  ): Promise<{ cpkiEventId: string | null; running: boolean }> {
     const [row] = await this.db
       .select()
       .from(intelligenceThreadEvents)
       .where(eq(intelligenceThreadEvents.threadId, threadId))
       .orderBy(desc(intelligenceThreadEvents.id))
       .limit(1);
-    if (!row) return null;
-    const lock = await this.getLock(threadId);
     return {
-      cpkiEventId:
-        (row.event as { metadata?: { cpki_event_id?: string } }).metadata
-          ?.cpki_event_id ?? String(row.id),
-      running: Boolean(lock && lock.expiresAt.getTime() > Date.now()),
+      cpkiEventId: row
+        ? ((row.event as { metadata?: { cpki_event_id?: string } }).metadata
+            ?.cpki_event_id ?? String(row.id))
+        : null,
+      running: await this.isThreadRunning(threadId),
     };
   }
 
