@@ -2,6 +2,13 @@
 
 # OpenBot
 
+**A completely local fork of OpenBot.** The app, the Bots, the computer and the plugins are
+upstream's, unchanged. The one addition is a built-in replacement for the three CopilotKit services
+OpenBot otherwise calls out to — threads and history, the realtime gateway, and the licence behind
+memory — running inside the API server, on the Postgres it already uses. No CopilotKit account, no
+extra service to run. "Local" is about CopilotKit's cloud and nothing else: a model still needs
+whatever endpoint its key points at. [The Intelligence platform →](docs/intelligence-platform.md)
+
 **The AI assistant your company can actually own.** Same shape as ChatGPT, Claude or Grok, with one difference that matters: it runs on your infrastructure and you can change anything about it. Any agent stack, through AG-UI.
 
 Each coworker gets a real browser with its own logins, its own files, and only the tools you grant. Every action decided before it happens and recorded after.
@@ -28,15 +35,6 @@ answers with components rather than only prose, and the whole thing runs on
 your own machine.
 
 </div>
-
-> **A local-only fork.** Upstream OpenBot depends on three CopilotKit-hosted services: thread and
-> history storage, the realtime gateway, and the licence behind memory. This fork replaces them with
-> an implementation that runs inside the API server, on the Postgres it already uses — one process,
-> no CopilotKit account, no extra service to run. Everything else is upstream, unchanged: the app,
-> the Bots, the computer, the plugins, and the `@copilotkit/*` packages, which keep working because
-> the built-in platform speaks the protocol they already talk. "Local" is about CopilotKit's cloud
-> and nothing else — a model still needs wherever its key points, including a model you host.
-> See [the Intelligence platform](docs/intelligence-platform.md).
 
 > **A template, not a product.** OpenBot is meant to be cloned and made your own. There is no hosted version to sign up for, and nothing here is published as a package to depend on: every workspace in this repository is private. You take the repository, replace the example tenant package under `examples/` with your own coworkers, channels and skills, and run it. Everything below describes a starting point, not a finished thing somebody operates for you.
 
