@@ -6,7 +6,7 @@ drive, and it can carry its own PostgreSQL as well. It does what it does on a la
 ```sh
 # Every release publishes this image, so a deployment needs no clone and no build.
 # `latest` is the most recent; a version tag such as `:v0.0.9` pins one.
-image=ghcr.io/copilotkit/openbot:latest
+image=ghcr.io/lennartschoch/openbot:latest
 
 # A database you already run.
 docker run -p 3001:3001 --env-file .env "$image"
