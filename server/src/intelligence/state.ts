@@ -16,7 +16,9 @@ function applyJsonPatch(
     }
     let node: Record<string, unknown> = next;
     for (const part of parts.slice(0, -1)) {
-      node = (node[part] ??= {}) as Record<string, unknown>;
+      const child = (node[part] as Record<string, unknown> | undefined) ?? {};
+      node[part] = child;
+      node = child;
     }
     const last = parts[parts.length - 1];
     if (op.op === "remove") delete node[last];

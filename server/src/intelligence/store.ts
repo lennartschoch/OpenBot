@@ -148,9 +148,10 @@ export class IntelligenceStore {
     threads: ReturnType<typeof toThreadSummary>[];
     nextCursor: string | null;
   }> {
+    const requested = input.limit ?? 0;
     const limit =
-      Number.isFinite(input.limit) && (input.limit ?? 0) > 0
-        ? Math.min(Math.floor(input.limit!), 500)
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(Math.floor(requested), 500)
         : 200;
     const conditions = [eq(intelligenceThreads.userId, input.userId)];
     if (input.agentId) {
