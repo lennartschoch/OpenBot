@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
 import {
@@ -6,11 +7,43 @@ import {
   intelligenceJoinTokens,
   intelligenceLearningContainers,
   intelligenceMemories,
+  intelligenceSkillRevisions,
   intelligenceThreadEvents,
   intelligenceThreadLocks,
   intelligenceThreads,
 } from "../db/schema/intelligence";
 import { foldEventsToMessages } from "./messages";
+
+/**
+ * The revision a skills ZIP declares: `manifest.json` names it (the publisher
+ * stamps the archive, the platform stores it under that id, and the runtime's
+ * registry checks `manifest.revision` against the revision header). Read
+ * straight from the ZIP's local file headers, inflating the manifest entry.
+ */
+export function readArchiveRevision(archive: Buffer): string | null {
+  let offset = 0;
+  while (offset + 30 <= archive.length && archive.readUInt32LE(offset) === 0x04034b50) {
+    const method = archive.readUInt16LE(offset + 8);
+    const compressedSize = archive.readUInt32LE(offset + 18);
+    const nameLength = archive.readUInt16LE(offset + 26);
+    const extraLength = archive.readUInt16LE(offset + 28);
+    const name = archive.subarray(offset + 30, offset + 30 + nameLength).toString();
+    const dataStart = offset + 30 + nameLength + extraLength;
+    if (dataStart + compressedSize > archive.length) return null;
+    if (name === "manifest.json") {
+      const entry = archive.subarray(dataStart, dataStart + compressedSize);
+      const bytes = method === 8 ? inflateRawSync(entry) : entry;
+      try {
+        const manifest = JSON.parse(bytes.toString("utf8")) as { revision?: unknown };
+        return typeof manifest.revision === "string" ? manifest.revision : null;
+      } catch {
+        return null;
+      }
+    }
+    offset = dataStart + compressedSize;
+  }
+  return null;
+}
 
 /**
  * The storage behind the local Intelligence platform.
@@ -576,6 +609,59 @@ export class IntelligenceStore {
 
   async listContainers() {
     return this.db.select().from(intelligenceLearningContainers);
+  }
+
+  /** Create a Learning Container with the project service token; idempotent. */
+  async createContainer(input: {
+    id: string;
+    name: string;
+    projectId: number;
+  }): Promise<"created" | "present"> {
+    const [row] = await this.db
+      .insert(intelligenceLearningContainers)
+      .values({ id: input.id, name: input.name, projectId: input.projectId })
+      .onConflictDoNothing()
+      .returning({ id: intelligenceLearningContainers.id });
+    return row ? "created" : "present";
+  }
+
+  /** One published Skill revision's ZIP: the newest, or the one named. */
+  async skillRevision(
+    containerId: string,
+    revision?: string,
+  ): Promise<{ revision: string; archive: Buffer } | null> {
+    const [row] = await this.db
+      .select()
+      .from(intelligenceSkillRevisions)
+      .where(
+        and(
+          eq(intelligenceSkillRevisions.containerId, containerId),
+          ...(revision ? [eq(intelligenceSkillRevisions.revision, revision)] : []),
+        ),
+      )
+      .orderBy(desc(intelligenceSkillRevisions.publishedAt))
+      .limit(1);
+    if (!row) return null;
+    return { revision: row.revision, archive: row.archive };
+  }
+
+  /** Publish one Skill revision: the ZIP and its content hash (the revision). */
+  async publishSkillRevision(input: {
+    containerId: string;
+    archive: Buffer;
+  }): Promise<string> {
+    const revision =
+      readArchiveRevision(input.archive) ??
+      createHash("sha256").update(input.archive).digest("hex");
+    await this.db
+      .insert(intelligenceSkillRevisions)
+      .values({
+        containerId: input.containerId,
+        revision,
+        archive: input.archive,
+      })
+      .onConflictDoNothing();
+    return revision;
   }
 
   // ---- managed-channel files ----------------------------------------------

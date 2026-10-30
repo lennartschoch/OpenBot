@@ -161,7 +161,12 @@ export const intelligenceLearningContainers = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    projectId: integer("project_id").notNull().default(1),
+    promptContext: text("prompt_context"),
     createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },

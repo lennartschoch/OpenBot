@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { IntelligenceStore, toMemorySummary, toThreadSummary } from "./store";
 import { foldState } from "./state";
@@ -53,6 +54,9 @@ export function createIntelligenceRestRoutes(
   const app = new Hono();
 
   app.use("*", async (c, next) => {
+    // The project service token has its own header (the Learning setup job
+    // has no API key), so it is authorized where it is checked.
+    if (c.req.header("x-copilotkit-ei-service-token")) return next();
     const header = c.req.header("authorization") ?? "";
     if (header !== `Bearer ${apiKey}`) {
       return c.json({ error: { code: "UNAUTHORIZED", retryable: false } }, 401);
@@ -389,7 +393,7 @@ export function createIntelligenceRestRoutes(
     return c.json({ handle });
   });
 
-  // ---- learning (Phase 3: containers from the table, runs/candidates pages) --
+  // ---- learning (Phase 3: containers, skill-ZIP snapshots) ----------------
 
   app.get("/api/v1/learning/containers", async (c) => {
     const rows = await store.listContainers();
@@ -397,10 +401,67 @@ export function createIntelligenceRestRoutes(
       containers: rows.map((row) => ({
         id: row.id,
         name: row.name,
+        projectId: row.projectId,
+        promptContext: row.promptContext,
         createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
       })),
       nextCursor: null,
     });
+  });
+
+  /** A project's service token creates its Learning container (idempotent). */
+  app.post("/api/learning/projects/:projectId/containers", async (c) => {
+    const serviceToken = c.req.header("x-copilotkit-ei-service-token");
+    if (!serviceToken) return c.body(null, 401);
+    const body = await c.req.json<{ id: string; name: string }>();
+    const projectId = Number(c.req.param("projectId"));
+    const outcome = await store.createContainer({
+      id: body.id,
+      name: body.name,
+      projectId: Number.isInteger(projectId) ? projectId : 1,
+    });
+    if (outcome === "present")
+      return c.json({ error: { code: "LEARNING_CONTAINER_ALREADY_EXISTS" } }, 409);
+    return c.json({ container: { id: body.id, projectId: Number.isInteger(projectId) ? projectId : 1 } }, 201);
+  });
+
+  /**
+   * One Skill snapshot as the runtime's registry reads it: the ZIP, its
+   * content hash as the revision, and the revision's digest as the ETag
+   * (304 on a matching If-None-Match).
+   */
+  app.get("/api/v1/learning/containers/:id/skills", async (c) => {
+    const containerId = c.req.param("id");
+    const revision = c.req.query("revision");
+    const containers = await store.listContainers();
+    if (!containers.some((row) => row.id === containerId))
+      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 403);
+    const found = await store.skillRevision(containerId, revision);
+    if (!found)
+      return c.json({ error: { code: "REVISION_NOT_FOUND" } }, 403);
+    const etag = `"${createHash("sha256").update(found.archive).digest("hex")}"`;
+    if (c.req.header("if-none-match") === etag)
+      return new Response(null, {
+        status: 304,
+        headers: { etag, "x-copilotkit-skills-revision": found.revision },
+      });
+    return new Response(new Uint8Array(found.archive), {
+      headers: {
+        "content-type": "application/zip",
+        etag,
+        "x-copilotkit-skills-revision": found.revision,
+      },
+    });
+  });
+
+  /** Publish one Skill revision: the ZIP, stored under its content hash. */
+  app.put("/api/v1/learning/containers/:id/skills", async (c) => {
+    const revision = await store.publishSkillRevision({
+      containerId: c.req.param("id"),
+      archive: Buffer.from(await c.req.arrayBuffer()),
+    });
+    return c.json({ revision });
   });
 
   app.get("/api/v1/learning/containers/:id/runs", (c) =>
