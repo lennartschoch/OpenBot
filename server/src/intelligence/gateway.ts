@@ -107,7 +107,7 @@ export class IntelligenceGateway {
       case "phx_leave":
         data.joined.delete(topic);
         data.streamModes?.delete(topic);
-        this.subscribers.get(topic)?.delete(ws);
+        this.unsubscribe(topic, ws);
         reply(ws, joinRef, ref, topic, {});
         break;
       case "heartbeat":
@@ -118,8 +118,9 @@ export class IntelligenceGateway {
         void this.ingest(ws, topic, ref, payload);
         break;
       case STOP_RUN_EVENT:
-        this.relayStop(topic, payload);
+        // The relay reads the thread's lock, so the reply does not wait on it.
         reply(ws, joinRef, ref, topic, {});
+        void this.relayStop(topic);
         break;
       default:
         // Every other push is relayed to the topic's other members: the
@@ -133,7 +134,7 @@ export class IntelligenceGateway {
   handleClose(ws: GatewaySocket): void {
     const data = ws.data as SocketData;
     for (const topic of data.joined.keys()) {
-      this.subscribers.get(topic)?.delete(ws);
+      this.unsubscribe(topic, ws);
     }
     data.joined.clear();
     data.streamModes?.clear();
@@ -162,9 +163,23 @@ export class IntelligenceGateway {
       } catch {
         // A socket the transport has already dropped: it leaves on its close
         // event, and the rest of the topic's members still get the frame.
-        sockets.delete(socket);
+        this.unsubscribe(topic, socket);
       }
     }
+  }
+
+  /**
+   * Drop a socket from a topic, and the topic once nobody is on it.
+   *
+   * The registry is keyed by thread, trajectory and ingestion-run id, all of which
+   * are minted per use, so leaving an empty set behind was a map that grew for the
+   * life of the process.
+   */
+  private unsubscribe(topic: string, ws: GatewaySocket): void {
+    const sockets = this.subscribers.get(topic);
+    if (!sockets) return;
+    sockets.delete(ws);
+    if (sockets.size === 0) this.subscribers.delete(topic);
   }
 
   /**
@@ -442,7 +457,7 @@ export class IntelligenceGateway {
       try {
         socket.send(frame);
       } catch {
-        sockets.delete(socket);
+        this.unsubscribe(topic, socket);
       }
     }
   }
@@ -453,22 +468,25 @@ export class IntelligenceGateway {
    * The hosted gateway hands the runner an AG-UI `CUSTOM` event named `stop` on
    * its ingestion channel; the runner stops the agent, and its terminal events
    * come back through the event push.
+   *
+   * The run is the one the thread's lock names, never the `run_id` the push
+   * carries: that is whatever the browser had on screen, and relaying it would let
+   * any client with a token for its own thread cancel a run on another one by
+   * naming it. Reading the lock also gets the right `threadId` into the relayed
+   * event, which the push cannot know.
    */
-  private relayStop(
-    threadTopic: string,
-    payload: Record<string, unknown>,
-  ): void {
+  private async relayStop(threadTopic: string): Promise<void> {
     const threadId = threadTopic.slice("thread:".length);
-    this.broadcast(
-      `ingestion:${String(payload.run_id ?? payload.runId ?? "")}`,
-      RUNNER_EVENT,
-      {
-        type: "CUSTOM",
-        name: "stop",
-        timestamp: Date.now(),
-        threadId,
-      },
-    );
+    const lock = await this.store.getLock(threadId);
+    // No live run: there is nothing to stop, and the browser's own run already
+    // ended (its terminal event is on the thread channel).
+    if (!lock || lock.expiresAt.getTime() <= Date.now()) return;
+    this.broadcast(`ingestion:${lock.runId}`, RUNNER_EVENT, {
+      type: "CUSTOM",
+      name: "stop",
+      timestamp: Date.now(),
+      threadId,
+    });
   }
 }
 

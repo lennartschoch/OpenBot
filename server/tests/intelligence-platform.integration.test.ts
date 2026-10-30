@@ -699,6 +699,160 @@ describe("the gateway relays between planes", () => {
     expect(viewerFrame[4].type).toBe("RUN_STARTED");
   });
 
+  /*
+   * The push's own `run_id` is whatever the browser had on screen. Relaying it meant a
+   * client holding a token for its own thread could name another run — a stale id, or
+   * somebody else's — and cancel it. The run that stops is the one the lock names.
+   */
+  test("a stop reaches the run holding the thread, whatever the push names", async () => {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId: "u1", agentId: "a1" }),
+    });
+    const holder = `run-${unique()}`;
+    await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId: holder, userId: "u1", agentId: "a1" }),
+    });
+
+    const gateway = app.gateway;
+    const holderRunner = captureSocket();
+    const strangerRunner = captureSocket();
+    for (const [socket, runId] of [
+      [holderRunner, holder],
+      [strangerRunner, `run-stranger-${unique()}`],
+    ] as const) {
+      gateway.handle(
+        socket,
+        JSON.stringify([null, "1", `ingestion:${runId}`, "phx_join", {}]),
+      );
+    }
+
+    const minted = await call(
+      app,
+      `/api/threads/${threadId}/join-code?userId=u1`,
+    );
+    const viewer = captureSocket({
+      phoenix: "client",
+      joinToken: minted.body.joinToken,
+    });
+    gateway.handle(
+      viewer,
+      JSON.stringify([
+        null,
+        "1",
+        `thread:${threadId}`,
+        "phx_join",
+        { stream_mode: "connect" },
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const stranger = JSON.parse(strangerRunner.frames.at(-1)!)[2] as string;
+    gateway.handle(
+      viewer,
+      JSON.stringify([
+        null,
+        "2",
+        `thread:${threadId}`,
+        "stop_run",
+        { run_id: stranger.slice("ingestion:".length) },
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const holderEvents = holderRunner.frames
+      .map((frame) => JSON.parse(frame) as Frame<Record<string, unknown>>)
+      .filter((frame) => frame[3] === "ag-ui");
+    expect(holderEvents.length).toBe(1);
+    expect(holderEvents[0][4].name).toBe("stop");
+    expect(holderEvents[0][4].threadId).toBe(threadId);
+    expect(
+      strangerRunner.frames
+        .map((frame) => JSON.parse(frame) as Frame<Record<string, unknown>>)
+        .filter((frame) => frame[3] === "ag-ui").length,
+    ).toBe(0);
+  });
+
+  test("a stop with no run in progress relays nothing", async () => {
+    const threadId = unique();
+    await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId: "u1", agentId: "a1" }),
+    });
+    const runId = `run-${unique()}`;
+    const runner = captureSocket();
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "1", `ingestion:${runId}`, "phx_join", {}]),
+    );
+    const minted = await call(
+      app,
+      `/api/threads/${threadId}/join-code?userId=u1`,
+    );
+    const viewer = captureSocket({
+      phoenix: "client",
+      joinToken: minted.body.joinToken,
+    });
+    app.gateway.handle(
+      viewer,
+      JSON.stringify([
+        null,
+        "1",
+        `thread:${threadId}`,
+        "phx_join",
+        { stream_mode: "connect" },
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const before = runner.frames.length;
+
+    app.gateway.handle(
+      viewer,
+      JSON.stringify([
+        null,
+        "2",
+        `thread:${threadId}`,
+        "stop_run",
+        { run_id: runId },
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(runner.frames.length).toBe(before);
+  });
+
+  // The registry is keyed by ids that are minted per use, so an empty set left behind was
+  // a map that grew for the life of the process.
+  test("the socket registry drops a topic once nobody is on it", async () => {
+    const topic = `trajectory:${unique()}`;
+    const registry = (
+      app.gateway as unknown as { subscribers: Map<string, Set<unknown>> }
+    ).subscribers;
+    const socket = captureSocket({ phoenix: "channels" });
+    app.gateway.handle(
+      socket,
+      JSON.stringify([null, "1", topic, "phx_join", {}]),
+    );
+    expect(registry.get(topic)?.size).toBe(1);
+
+    app.gateway.handle(
+      socket,
+      JSON.stringify([null, "2", topic, "phx_leave", {}]),
+    );
+    expect(registry.has(topic)).toBe(false);
+
+    // And on close, which is the path a browser that navigates away takes.
+    app.gateway.handle(
+      socket,
+      JSON.stringify([null, "3", topic, "phx_join", {}]),
+    );
+    expect(registry.get(topic)?.size).toBe(1);
+    app.gateway.handleClose(socket);
+    expect(registry.has(topic)).toBe(false);
+  });
+
   test("control pushes relay to the topic's other members", async () => {
     const gateway = app.gateway;
     const a = captureSocket({ phoenix: "channels" });
