@@ -4,6 +4,7 @@ import { Socket } from "/home/agent/workspace/OpenBot/node_modules/.bun/phoenix@
 
 const REST = "http://localhost:3101/api/intelligence";
 const KEY = "local-intelligence";
+const USER = "dev-local-user";
 const THREAD = `e2e-${Date.now()}`;
 const RUN_ID = `e2e-run-${Date.now()}`;
 
@@ -24,13 +25,13 @@ const client = await rest("/api/threads", {
   method: "POST",
   body: JSON.stringify({
     threadId: THREAD,
-    userId: "u-e2e",
+    userId: USER,
     agentId: "general-assistant",
   }),
 });
 if (!client.thread) throw new Error("thread create failed");
 const { joinToken } = await rest(
-  `/api/threads/${THREAD}/join-code?userId=u-e2e`,
+  `/api/threads/${THREAD}/join-code?userId=${USER}`,
 );
 
 const socket = new Socket(
@@ -105,7 +106,7 @@ console.log(
   "types",
 );
 
-const stored = await rest(`/api/threads/${THREAD}/messages?userId=u-e2e`);
+const stored = await rest(`/api/threads/${THREAD}/messages?userId=${USER}`);
 const roles = (stored.messages ?? []).map((m: any) => m.role).join(",");
 if (!stored.messages?.length) throw new Error("transcript not persisted");
 console.log("4. transcript folded + persisted:", roles);
@@ -122,7 +123,7 @@ console.log(
 
 const connect = await rest(`/api/threads/${THREAD}/connect`, {
   method: "POST",
-  body: JSON.stringify({ userId: "u-e2e", agentId: "general-assistant" }),
+  body: JSON.stringify({ userId: USER, agentId: "general-assistant" }),
 });
 const idle = typeof connect?.joinToken === "string" && !connect.runId;
 console.log(
