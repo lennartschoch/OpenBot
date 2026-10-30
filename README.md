@@ -15,8 +15,8 @@ Each coworker gets a real browser with its own logins, its own files, and only t
 
 [**Talk to an engineer**](https://copilotkit.ai/talk-to-an-engineer?ref=openbot_readme) · [**Have us build it with you**](https://copilotkit.ai/talk-to-an-engineer?ref=openbot_readme) · [**copilotkit.ai/openbot**](https://copilotkit.ai/openbot) · [**Quick start**](#quick-start) · [**Docs**](docs/README.md)
 
-[![CI](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml)
-[![security](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml)
+[![CI](https://github.com/lennartschoch/OpenBot/actions/workflows/ci.yml/badge.svg)](https://github.com/lennartschoch/OpenBot/actions/workflows/ci.yml)
+[![security](https://github.com/lennartschoch/OpenBot/actions/workflows/security_zizmor.yml/badge.svg)](https://github.com/lennartschoch/OpenBot/actions/workflows/security_zizmor.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Beta](https://img.shields.io/badge/status-beta-yellow.svg)
 
