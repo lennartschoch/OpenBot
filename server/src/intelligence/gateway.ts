@@ -40,11 +40,12 @@ type SocketData = PhoenixData;
 const RUNNER_EVENT_BATCH_CAPABILITY = "runner_event_batch_v1";
 const STOP_RUN_EVENT = "stop_run";
 const REPLAY_COMPLETE_EVENT = "replay_complete";
-const REPLAY_FAILED_EVENT = "replay_failed";
 const STREAM_IDLE_EVENT = "stream_idle";
 const AG_UI_EVENT = "ag_ui_event";
 /** The runner plane's channel event name (its `stop_run` relay rides this). */
 const RUNNER_EVENT = "ag-ui";
+/** Topic prefixes whose client joins carry a minted join token. */
+const TOKEN_TOPICS = ["thread:", "trajectory:", "user_meta:"];
 
 export class IntelligenceGateway {
   private readonly subscribers = new Map<string, Set<GatewaySocket>>();
@@ -141,7 +142,14 @@ export class IntelligenceGateway {
     if (!sockets) return;
     const frame = JSON.stringify([null, null, topic, event, payload]);
     for (const socket of sockets) {
-      if (socket !== except) socket.send(frame);
+      if (socket === except) continue;
+      try {
+        socket.send(frame);
+      } catch {
+        // A socket the transport has already dropped: it leaves on its close
+        // event, and the rest of the topic's members still get the frame.
+        sockets.delete(socket);
+      }
     }
   }
 
@@ -184,33 +192,14 @@ export class IntelligenceGateway {
       );
     // Authorize: runner joins need no per-thread token (the socket's bearer
     // key is the deployment's); client joins carry the minted join token, put
-    // on the socket URL by the Phoenix client's connect params.
-    if (data.phoenix === "client" && topic.startsWith("thread:")) {
+    // on the socket URL by the Phoenix client's connect params. Tokens name
+    // their scope, so a thread's token cannot join another thread's channel.
+    if (data.phoenix === "client" && TOKEN_TOPICS.some((p) => topic.startsWith(p))) {
       const token = data.joinToken;
-      const authorized = await this.store.authorizeTopic(
-        typeof token === "string" ? token : null,
-        topic,
-      );
-      if (!authorized.ok) {
-        replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
-        return;
-      }
-    }
-    // Trajectory capture streams join with their minted token too.
-    if (data.phoenix === "client" && topic.startsWith("trajectory:")) {
-      const token = data.joinToken;
-      if (
-        typeof token !== "string" ||
-        !(await this.store.authorizeTopic(token, topic)).ok
-      ) {
-        replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
-        return;
-      }
-    }
-    // The meta channels (thread list, memories) join with the socket's token too.
-    if (data.phoenix === "client" && topic.startsWith("user_meta:")) {
-      const token = data.joinToken;
-      if (typeof token !== "string" || !(await this.store.authorizeTopic(token, topic)).ok) {
+      const authorized =
+        typeof token === "string" &&
+        (await this.store.authorizeTopic(token, topic)).ok;
+      if (!authorized) {
         replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
         return;
       }
@@ -304,11 +293,15 @@ export class IntelligenceGateway {
       payload: event,
       seq: seqOf(event),
     }));
-    const { events: stored } = await this.store.appendEvents(
-      threadId,
-      runId,
-      stamped,
-    );
+    let stored: Record<string, unknown>[];
+    try {
+      stored = (await this.store.appendEvents(threadId, runId, stamped)).events;
+    } catch {
+      // A store failure is the runner's to handle: the push goes un-acked, and
+      // its durability contract replays the batch (idempotent on (run_id, seq)).
+      replyError(ws, joinRef, ref, ingestionTopic, { reason: "store_failed" });
+      return;
+    }
     // The hosted platform echoes every accepted push back on the ingestion
     // channel (that echo is what feeds the runner's own event stream) and
     // rebroadcasts it on the thread channel for viewers.

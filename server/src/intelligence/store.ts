@@ -386,20 +386,6 @@ export class IntelligenceStore {
 
   // ---- join tokens --------------------------------------------------------
 
-  /**
-   * Subscribe to a thread's events and state: mint the join token the runtime
-   * passes to the gateway as the client's subscription credential.
-   */
-  async connect(threadId: string, runId: string): Promise<string | null> {
-    const [row] = await this.db
-      .select({ id: intelligenceThreads.id })
-      .from(intelligenceThreads)
-      .where(eq(intelligenceThreads.id, threadId))
-      .limit(1);
-    if (!row) return null;
-    return this.mintToken("thread", threadId);
-  }
-
   async mintToken(
     kind: "thread" | "user_threads" | "user_memories" | "trajectory",
     scope: string,
@@ -645,7 +631,11 @@ export class IntelligenceStore {
     return { revision: row.revision, archive: row.archive };
   }
 
-  /** Publish one Skill revision: the ZIP and its content hash (the revision). */
+  /**
+   * Publish one Skill revision. The revision is the id the archive's
+   * `manifest.json` declares (what the runtime's registry pins and checks);
+   * an archive without a readable manifest is stored under its content hash.
+   */
   async publishSkillRevision(input: {
     containerId: string;
     archive: Buffer;
