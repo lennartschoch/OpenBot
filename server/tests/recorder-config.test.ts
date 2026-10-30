@@ -53,12 +53,18 @@ test("the example environment and the changelog name the variable and that a bad
   );
   expect(example).toContain("# OPENBOT_RECORDER_EXTRA_EXTENSION_IDS=");
   expect(example).toMatch(/Any\s+other value stops the server at boot/);
-  const [unreleased = ""] = readFileSync(
-    new URL("../../CHANGELOG.md", import.meta.url),
-    "utf8",
-  )
-    .split("## Unreleased")[1]
-    ?.split(/^## /m) ?? [""];
+  /*
+   * The newest section that HAS notes in it, whichever heading carries them.
+   *
+   * The release workflow promotes `## Unreleased` by inserting the version heading under it, so the
+   * notes move to `## 0.2.1` and `## Unreleased` is left empty. Reading only `Unreleased` therefore
+   * failed on the first commit that released these changes, and would fail on every release after.
+   */
+  const unreleased =
+    readFileSync(new URL("../../CHANGELOG.md", import.meta.url), "utf8")
+      .split(/^## /m)
+      .slice(1)
+      .find((section) => section.replace(/^[^\n]*\n/, "").trim() !== "") ?? "";
   for (const term of [
     "0066_recorder_extension",
     "OPENBOT_RECORDER_EXTRA_EXTENSION_IDS",
