@@ -1,6 +1,10 @@
 name: CI
 
 on:
+  # On demand, so a run can be repeated without inventing a commit to push: after a flaky job, and
+  # after an Actions setting changes what the token may do. A fork with no release cadence needs this
+  # more than upstream does.
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
