@@ -45,6 +45,11 @@ With no container assigned, the server asks Intelligence, using its runtime key,
 
 ## Creating the container
 
+Nothing on this page is needed with the Intelligence platform this server ships: its migration
+creates `openbot`, so a fresh deployment has the container before the first run. What follows is for a
+deployment pointing `INTELLIGENCE_API_URL` at managed Intelligence or at its own copy of it, where the
+container lives in somebody else's project.
+
 Intelligence creates Learning containers (`POST /api/learning/projects/:projectId/containers`) for three callers only: a person's browser session, a CopilotKit CLI login, and a service token, which counts only on a CopilotKit local evaluation install. A project's runtime key is none of them. So OpenBot creates `openbot` wherever it holds one of those, proves the result with the runtime key (a container the key cannot see is in another project and is reported, never assigned), and otherwise says exactly what to run:
 
 | Where | Credential | What happens |
