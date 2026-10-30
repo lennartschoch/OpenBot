@@ -16,7 +16,7 @@ import { crc32, deflateRawSync } from "node:zlib";
 export function buildZip(
   entries: [string, Uint8Array][],
   options: { deflate?: boolean } = {},
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   const chunks: Uint8Array[] = [];
   const central: Uint8Array[] = [];
   const u32 = (v: number) =>

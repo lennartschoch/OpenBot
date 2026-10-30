@@ -1,7 +1,9 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { createDatabase } from "../src/db/client";
 import { intelligenceThreadEvents } from "../src/db/schema/intelligence";
 import { createLocalIntelligence } from "../src/intelligence/index";
+import { buildZip } from "./support/zip";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
 /**
@@ -447,6 +449,60 @@ describe("entitlements, learning and files", () => {
       },
     );
     expect(missing.status).toBe(404);
+  });
+
+  /*
+   * The revision the runtime's registry pins is the one inside the archive's
+   * `manifest.json`, read straight out of the ZIP's local file headers. Every other case
+   * here publishes bytes that are not an archive at all, so the path that reads a real
+   * one — the deflated shape a publisher emits, with the manifest not first — went
+   * unexercised, along with the inflate step.
+   */
+  test("a Skills archive is stored under the revision its manifest declares", async () => {
+    const containerId = `c-${unique()}`;
+    const created = await call(app, "/api/learning/projects/1/containers", {
+      method: "POST",
+      headers: { "x-copilotkit-ei-service-token": SERVICE_TOKEN },
+      body: JSON.stringify({ id: containerId, name: "Real archive" }),
+    });
+    expect(created.status).toBe(201);
+
+    const encoder = new TextEncoder();
+    const archive = buildZip(
+      [
+        [
+          "README.md",
+          encoder.encode("a skill, described at length ".repeat(20)),
+        ],
+        [
+          "manifest.json",
+          encoder.encode(JSON.stringify({ revision: "rev-42", skills: [] })),
+        ],
+      ],
+      { deflate: true },
+    );
+    const published = await app.rest.request(
+      `/api/v1/learning/containers/${containerId}/skills`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${API_KEY}` },
+        body: new Blob([archive]),
+      },
+    );
+    expect(published.status).toBe(200);
+    expect(await published.json()).toEqual({ revision: "rev-42" });
+
+    const snapshot = await app.rest.request(
+      `/api/v1/learning/containers/${containerId}/skills?revision=rev-42`,
+      { headers: { authorization: `Bearer ${API_KEY}` } },
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("x-copilotkit-skills-revision")).toBe("rev-42");
+    expect(snapshot.headers.get("etag")).toBe(
+      `"${createHash("sha256").update(archive).digest("hex")}"`,
+    );
+    // Byte for byte, so a publish and a read cannot disagree about the archive.
+    expect(new Uint8Array(await snapshot.arrayBuffer())).toEqual(archive);
   });
 
   test("a container reads back, a thread records its assignment, and the batch serves several snapshots", async () => {
@@ -1037,6 +1093,91 @@ describe("the hosted realtime control contract", () => {
     const idle = framesOf(client, "stream_idle");
     expect(idle.length).toBe(1);
     expect(idle[0][4].latestEventId).toBe("i2");
+  });
+
+  /*
+   * `stream_idle` tells a connect-mode stream that there is nothing left to wait for.
+   * A run-mode subscriber is waiting for a run it just started, and the frame that ends
+   * a connect stream would end that one — so the run's own finish must not be sent to it.
+   */
+  test("a run subscriber is not idled by the run it is watching finishing", async () => {
+    const threadId = await thread();
+    const runId = `run-${unique()}`;
+    await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId, userId: "u1", agentId: "a1" }),
+    });
+    const minted = await call(
+      app,
+      `/api/threads/${threadId}/join-code?userId=u1`,
+    );
+    const watching = captureSocket({
+      phoenix: "client",
+      joinToken: minted.body.joinToken,
+    });
+    join(watching, `thread:${threadId}`, { stream_mode: "run", run_id: runId });
+
+    // The same thread, watched by a browser that reconnected: connect mode, which the
+    // finish does idle.
+    const reconnected = captureSocket({
+      phoenix: "client",
+      joinToken: (
+        await call(app, `/api/threads/${threadId}/join-code?userId=u1`)
+      ).body.joinToken,
+    });
+    join(reconnected, `thread:${threadId}`, {
+      stream_mode: "connect",
+      last_seen_event_id: null,
+    });
+    await wait(150);
+
+    const runner = captureSocket();
+    app.gateway.handle(
+      runner,
+      JSON.stringify([
+        null,
+        "1",
+        `ingestion:${runId}`,
+        "phx_join",
+        { thread_id: threadId, run_id: runId },
+      ]),
+    );
+    app.gateway.handle(
+      runner,
+      JSON.stringify([
+        null,
+        "2",
+        `ingestion:${runId}`,
+        "events",
+        {
+          events: [
+            {
+              type: "RUN_STARTED",
+              threadId,
+              runId,
+              metadata: { cpki_event_id: "k1", cpki_event_seq: 1 },
+            },
+            {
+              type: "RUN_FINISHED",
+              threadId,
+              runId,
+              metadata: { cpki_event_id: "k2", cpki_event_seq: 2 },
+            },
+          ],
+        },
+      ]),
+    );
+    await wait(400);
+
+    // The run's own events reach both, and only the connect stream is told it is over.
+    expect(
+      framesOf(watching, "ag_ui_event").map(
+        (frame) =>
+          (frame[4].metadata as { cpki_event_id: string }).cpki_event_id,
+      ),
+    ).toEqual(["k1", "k2"]);
+    expect(framesOf(watching, "stream_idle")).toEqual([]);
+    expect(framesOf(reconnected, "stream_idle").length).toBe(1);
   });
 
   test("an idle thread replays and then idles", async () => {
