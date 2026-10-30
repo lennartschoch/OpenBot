@@ -740,7 +740,8 @@ export class IntelligenceStore {
           eq(intelligenceMemories.scope, input.scope),
           isNull(intelligenceMemories.invalidatedAt),
         ),
-      );
+      )
+      .limit(500);
     const existing = candidates.find((row) => memoryKey(row.content) === key);
     if (existing) {
       const sourceThreadIds = [
