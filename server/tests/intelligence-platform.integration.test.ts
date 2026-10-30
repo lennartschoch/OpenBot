@@ -797,3 +797,68 @@ describe("the hosted lock and thread lifecycle contract", () => {
     expect(first.status).toBe(404);
   });
 });
+
+describe("thread list pagination", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  test("pages by an opaque cursor and keeps the summary to the hosted shape", async () => {
+    const userId = `page-${unique()}`;
+    const ids: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const threadId = `page-${unique()}`;
+      ids.push(threadId);
+      const created = await call(app, "/api/threads", {
+        method: "POST",
+        body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+      });
+      expect(created.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const first = await call(app, `/api/threads?userId=${userId}&agentId=a1&limit=2`);
+    expect(first.status).toBe(200);
+    expect(first.body.threads.length).toBe(2);
+    expect(typeof first.body.nextCursor).toBe("string");
+    expect(first.body.threads[0].lastRunAt).toBeUndefined();
+    expect(first.body.threads[0].lastUpdatedAt).toBeUndefined();
+    expect(first.body.threads[0].learningContainerId).toBeNull();
+
+    const second = await call(
+      app,
+      `/api/threads?userId=${userId}&agentId=a1&limit=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+    );
+    expect(second.status).toBe(200);
+    expect(second.body.threads.length).toBe(1);
+    expect(second.body.nextCursor).toBeNull();
+    expect([
+      ...first.body.threads.map((thread: any) => thread.id),
+      ...second.body.threads.map((thread: any) => thread.id),
+    ].sort()).toEqual([...ids].sort());
+
+    const invalid = await call(
+      app,
+      `/api/threads?userId=${userId}&agentId=a1&cursor=not-a-cursor`,
+    );
+    expect(invalid.status).toBe(400);
+  });
+
+  test("a rename moves a thread to the front of the next page", async () => {
+    const userId = `page-${unique()}`;
+    const firstId = `page-${unique()}`;
+    const secondId = `page-${unique()}`;
+    for (const threadId of [firstId, secondId]) {
+      await call(app, "/api/threads", {
+        method: "POST",
+        body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await call(app, `/api/threads/${firstId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ userId, agentId: "a1", name: "Newest" }),
+    });
+    const listed = await call(app, `/api/threads?userId=${userId}&agentId=a1`);
+    expect(listed.body.threads[0].id).toBe(firstId);
+  });
+});

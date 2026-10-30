@@ -1,6 +1,11 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { IntelligenceStore, toMemorySummary, toThreadSummary } from "./store";
+import {
+  decodeThreadCursor,
+  IntelligenceStore,
+  toMemorySummary,
+  toThreadSummary,
+} from "./store";
 import { foldState } from "./state";
 
 /**
@@ -82,16 +87,25 @@ export function createIntelligenceRestRoutes(
     const userId = c.req.query("userId");
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
-    const threads = await store.listThreads({
+    const rawCursor = c.req.query("cursor");
+    const cursor = rawCursor ? decodeThreadCursor(rawCursor) : undefined;
+    if (rawCursor && !cursor)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const page = await store.listThreads({
       userId,
       agentId: c.req.query("agentId") || undefined,
       includeArchived: c.req.query("includeArchived") === "true",
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      cursor: cursor ?? undefined,
     });
     // The stable `user_meta` channel suffix; the join token for it comes from
     // `/threads/subscribe`, as it does on the hosted platform.
     const joinCode = await store.ensureJoinCode(userId);
-    return c.json({ threads, joinCode, nextCursor: null });
+    return c.json({
+      threads: page.threads,
+      joinCode,
+      nextCursor: page.nextCursor,
+    });
   });
 
   app.post("/api/threads", async (c) => {

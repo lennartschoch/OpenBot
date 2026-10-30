@@ -59,20 +59,37 @@ export type MemoryRow = typeof intelligenceMemories.$inferSelect;
 
 /** The platform's `ThreadSummary` projection, from this deployment's row. */
 export function toThreadSummary(row: ThreadRow) {
+  const learningContainerIds = row.learningContainerIds ?? [];
   return {
     id: row.id,
     name: row.name,
     agentId: row.agentId,
     createdById: row.userId,
     archived: row.archived,
-    learningContainerIds: row.learningContainerIds,
+    learningContainerIds,
+    learningContainerId:
+      learningContainerIds.length === 1 ? learningContainerIds[0] : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    ...(row.lastRunAt ? { lastRunAt: row.lastRunAt.toISOString() } : {}),
-    ...(row.lastUpdatedAt
-      ? { lastUpdatedAt: row.lastUpdatedAt.toISOString() }
-      : {}),
   };
+}
+
+/** A page's keyset position: the exact database timestamp and the row id. */
+export type ThreadCursor = { value: string; id: string };
+
+export function encodeThreadCursor(cursor: ThreadCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+export function decodeThreadCursor(raw: string): ThreadCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    return typeof parsed?.value === "string" && typeof parsed?.id === "string"
+      ? { value: parsed.value, id: parsed.id }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The platform's `MemorySummary` projection. */
@@ -97,24 +114,55 @@ export class IntelligenceStore {
 
   // ---- threads ------------------------------------------------------------
 
+  /**
+   * One page of a person's threads, newest activity first, with the keyset a
+   * client sends back for the next page. The cursor carries the database's
+   * microsecond `updated_at`, not the millisecond ISO string in the summary, so
+   * a page boundary cannot duplicate or skip a row written in the same
+   * millisecond.
+   */
   async listThreads(input: {
     userId: string;
     agentId?: string;
     includeArchived?: boolean;
     limit?: number;
-  }) {
+    cursor?: ThreadCursor;
+  }): Promise<{ threads: ReturnType<typeof toThreadSummary>[]; nextCursor: string | null }> {
+    const limit =
+      Number.isFinite(input.limit) && (input.limit ?? 0) > 0
+        ? Math.min(Math.floor(input.limit!), 500)
+        : 200;
     const conditions = [eq(intelligenceThreads.userId, input.userId)];
     if (input.agentId) {
       conditions.push(eq(intelligenceThreads.agentId, input.agentId));
     }
-    if (!input.includeArchived) conditions.push(eq(intelligenceThreads.archived, false));
+    if (!input.includeArchived) {
+      conditions.push(eq(intelligenceThreads.archived, false));
+    }
+    if (input.cursor) {
+      conditions.push(
+        sql`(${intelligenceThreads.updatedAt}, ${intelligenceThreads.id}) < (${input.cursor.value}::timestamptz, ${input.cursor.id})`,
+      );
+    }
+    // One extra row tells us whether there is a next page without a count.
     const rows = await this.db
-      .select()
+      .select({
+        row: intelligenceThreads,
+        cursorValue: sql<string>`to_char(${intelligenceThreads.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
       .from(intelligenceThreads)
       .where(and(...conditions))
-      .orderBy(desc(intelligenceThreads.lastUpdatedAt), desc(intelligenceThreads.createdAt))
-      .limit(Math.min(input.limit ?? 200, 500));
-    return rows.map(toThreadSummary);
+      .orderBy(desc(intelligenceThreads.updatedAt), desc(intelligenceThreads.id))
+      .limit(limit + 1);
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      threads: page.map(({ row }) => toThreadSummary(row)),
+      nextCursor:
+        rows.length > limit && last
+          ? encodeThreadCursor({ value: last.cursorValue, id: last.row.id })
+          : null,
+    };
   }
 
   async getThread(threadId: string) {
