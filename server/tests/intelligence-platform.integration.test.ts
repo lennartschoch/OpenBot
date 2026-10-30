@@ -42,6 +42,27 @@ async function call(
 
 const unique = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+/**
+ * The shapes these assertions read, narrow rather than `any`: the bodies arrive as
+ * `JSON.parse` output, so the annotation is what keeps the suite off `any` while still
+ * reading what the platform returned. A field added to a response stays invisible until
+ * an assertion asks for it, which is the point.
+ */
+type ThreadListRow = { id: string };
+type ContainerListRow = { id: string };
+type PersistedMessageRow = { id: string };
+type MemoryListRow = { id: string; scope: string };
+/** A Phoenix frame: `[join_ref, ref, topic, event, payload]`. */
+type Frame<Payload = Record<string, unknown>> = [
+  unknown,
+  unknown,
+  string,
+  string,
+  Payload,
+];
+/** What a `phx_reply` carries: the status the gateway answered, and its response. */
+type ReplyPayload = { status: string; response: Record<string, unknown> };
+
 describe("threads, locks and join codes", () => {
   let app: ReturnType<typeof intelligence>;
   beforeAll(() => (app = intelligence()));
@@ -69,7 +90,9 @@ describe("threads, locks and join codes", () => {
     expect(renamed.body.thread.name).toBe("Renamed");
 
     const listed = await call(app, `/api/threads?userId=u1&agentId=a1`);
-    expect(listed.body.threads.some((t: any) => t.id === threadId)).toBe(true);
+    expect(
+      listed.body.threads.some((t: ThreadListRow) => t.id === threadId),
+    ).toBe(true);
     // The thread-list meta channel's credential rides the page.
     expect(typeof listed.body.joinCode).toBe("string");
 
@@ -128,7 +151,7 @@ describe("threads, locks and join codes", () => {
       `/api/threads/${body.thread.id}/join-code?userId=u1`,
     );
     expect(minted.status).toBe(200);
-    const store = app.gateway.store;
+    const store = app.store;
     expect(
       (
         await store.authorizeTopic(
@@ -373,9 +396,9 @@ describe("entitlements, learning and files", () => {
     expect(present.status).toBe(409);
 
     const page = await call(app, "/api/v1/learning/containers");
-    expect(page.body.containers.some((c: any) => c.id === containerId)).toBe(
-      true,
-    );
+    expect(
+      page.body.containers.some((c: ContainerListRow) => c.id === containerId),
+    ).toBe(true);
 
     const published = await call(
       app,
@@ -670,7 +693,7 @@ describe("the gateway relays between planes", () => {
     const runnerEvents = runner.frames.map((f: string) => JSON.parse(f)[3]);
     expect(runnerEvents).toContain("phx_reply"); // the join ok
     expect(runnerEvents).toContain("ag-ui"); // the echo that feeds the run stream
-    const viewerFrame = JSON.parse(viewer.frames.at(-1));
+    const viewerFrame = JSON.parse(viewer.frames.at(-1)!);
     expect(viewerFrame[2]).toBe(`thread:${body.thread.id}`);
     expect(viewerFrame[3]).toBe("ag_ui_event");
     expect(viewerFrame[4].type).toBe("RUN_STARTED");
@@ -692,7 +715,7 @@ describe("the gateway relays between planes", () => {
         { deliveryId: "d1" },
       ]),
     );
-    const received = JSON.parse(b.frames.at(-1));
+    const received = JSON.parse(b.frames.at(-1)!);
     expect(received[3]).toBe("delivery_invitation");
     expect(received[4].deliveryId).toBe("d1");
   });
@@ -736,9 +759,7 @@ describe("the hosted realtime control contract", () => {
     new Promise((resolve) => setTimeout(resolve, ms));
   const framesOf = (socket: ReturnType<typeof captureSocket>, event: string) =>
     socket.frames
-      .map(
-        (frame) => JSON.parse(frame) as [unknown, unknown, string, string, any],
-      )
+      .map((frame) => JSON.parse(frame) as Frame)
       .filter((frame) => frame[3] === event);
 
   async function thread(userId = "u1") {
@@ -937,7 +958,9 @@ describe("the hosted realtime control contract", () => {
       app,
       `/api/threads/${threadId}/messages?userId=u1`,
     );
-    expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1"]);
+    expect(
+      messages.body.messages.map((m: PersistedMessageRow) => m.id),
+    ).toEqual(["u1", "a1"]);
 
     const second = `run-${unique()}`;
     await app.store.appendEvents(threadId, second, [
@@ -975,12 +998,9 @@ describe("the hosted realtime control contract", () => {
       },
     ]);
     messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
-    expect(messages.body.messages.map((m: any) => m.id)).toEqual([
-      "u1",
-      "a1",
-      "u2",
-      "a2",
-    ]);
+    expect(
+      messages.body.messages.map((m: PersistedMessageRow) => m.id),
+    ).toEqual(["u1", "a1", "u2", "a2"]);
 
     const third = `run-${unique()}`;
     await app.store.appendEvents(threadId, third, [
@@ -996,12 +1016,9 @@ describe("the hosted realtime control contract", () => {
       },
     ]);
     messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
-    expect(messages.body.messages.map((m: any) => m.id)).toEqual([
-      "u1",
-      "a1",
-      "u2",
-      "a2",
-    ]);
+    expect(
+      messages.body.messages.map((m: PersistedMessageRow) => m.id),
+    ).toEqual(["u1", "a1", "u2", "a2"]);
   });
 
   test("run start and finish publish thread_run_activity", async () => {
@@ -1074,9 +1091,7 @@ describe("platform authentication and thread ownership", () => {
     new Promise((resolve) => setTimeout(resolve, ms));
   const replyOf = (socket: ReturnType<typeof captureSocket>) =>
     socket.frames
-      .map(
-        (frame) => JSON.parse(frame) as [unknown, unknown, string, string, any],
-      )
+      .map((frame) => JSON.parse(frame) as Frame<ReplyPayload>)
       .filter((frame) => frame[3] === "phx_reply")
       .at(-1)?.[4];
 
@@ -1466,8 +1481,8 @@ describe("thread list pagination", () => {
     expect(second.body.nextCursor).toBeNull();
     expect(
       [
-        ...first.body.threads.map((thread: any) => thread.id),
-        ...second.body.threads.map((thread: any) => thread.id),
+        ...first.body.threads.map((thread: ThreadListRow) => thread.id),
+        ...second.body.threads.map((thread: ThreadListRow) => thread.id),
       ].sort(),
     ).toEqual([...ids].sort());
 
@@ -1602,7 +1617,7 @@ describe("memory scope, grants and absorption", () => {
     });
     expect(
       listWithGrant.body.memories.every(
-        (memory: any) => memory.scope === "user",
+        (memory: MemoryListRow) => memory.scope === "user",
       ),
     ).toBe(true);
 
@@ -1634,7 +1649,7 @@ describe("memory scope, grants and absorption", () => {
 
     const project = (
       await call(app, "/api/memories", { headers: userHeaders })
-    ).body.memories.find((memory: any) => memory.scope === "project");
+    ).body.memories.find((memory: MemoryListRow) => memory.scope === "project");
     const patchProject = await call(app, `/api/memories/${project.id}`, {
       method: "PATCH",
       headers: grantHeaders,
@@ -1774,7 +1789,9 @@ describe("event batch writes", () => {
       `/api/threads/${threadId}/messages?userId=u1`,
     );
     expect(
-      messages.body.messages.map((message: any) => message.id).sort(),
+      messages.body.messages
+        .map((message: PersistedMessageRow) => message.id)
+        .sort(),
     ).toEqual(["a-one", "a-two", "u-one", "u-two"]);
   });
 

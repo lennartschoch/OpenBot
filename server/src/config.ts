@@ -1010,8 +1010,7 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
     gatewayWsUrl:
       url(environment, "INTELLIGENCE_GATEWAY_WS_URL") ??
       `ws://localhost:${port}/api/intelligence-gateway`,
-    apiKey:
-      intelligenceApiKey(environment) ?? "local-intelligence",
+    apiKey: intelligenceApiKey(environment) ?? "local-intelligence",
     licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
   };
 

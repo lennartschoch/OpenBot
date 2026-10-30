@@ -132,7 +132,10 @@ export function startHttpServer(deps: {
           );
         }
         const plane = intelligencePlaneOf(url.pathname);
-        if (plane && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        if (
+          plane &&
+          request.headers.get("upgrade")?.toLowerCase() === "websocket"
+        ) {
           const data = intelligence.gateway.socketData(plane, request);
           if (
             server.upgrade(request, {

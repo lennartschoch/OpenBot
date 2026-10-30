@@ -37,7 +37,10 @@ export const intelligenceThreads = pgTable(
     archived: boolean("archived").notNull().default(false),
     /** The folded conversation, as AG-UI messages; the event log is the source. */
     messages: jsonb("messages").$type<unknown[]>().notNull().default([]),
-    learningContainerIds: text("learning_container_ids").array().notNull().default([]),
+    learningContainerIds: text("learning_container_ids")
+      .array()
+      .notNull()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -78,16 +81,13 @@ export const intelligenceThreadEvents = pgTable(
 );
 
 /** The per-thread run lock: one run at a time, with a TTL the runner renews. */
-export const intelligenceThreadLocks = pgTable(
-  "intelligence_thread_locks",
-  {
-    threadId: text("thread_id").primaryKey(),
-    runId: text("run_id").notNull(),
-    userId: text("user_id").notNull(),
-    agentId: text("agent_id").notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  },
-);
+export const intelligenceThreadLocks = pgTable("intelligence_thread_locks", {
+  threadId: text("thread_id").primaryKey(),
+  runId: text("run_id").notNull(),
+  userId: text("user_id").notNull(),
+  agentId: text("agent_id").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
 
 /** Single-use join credentials minted by connect / join-code / subscribe. */
 export const intelligenceJoinTokens = pgTable(
@@ -127,9 +127,7 @@ export const intelligenceUserJoinCodes = pgTable(
 export const intelligenceChannelFiles = pgTable(
   "intelligence_channel_files",
   {
-    handle: text("handle")
-      .default(sql`gen_random_uuid()`)
-      .primaryKey(),
+    handle: text("handle").default(sql`gen_random_uuid()`).primaryKey(),
     deliveryId: text("delivery_id"),
     operationId: text("operation_id"),
     filename: text("filename"),
@@ -141,7 +139,9 @@ export const intelligenceChannelFiles = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("intelligence_channel_files_delivery_idx").on(table.deliveryId)],
+  (table) => [
+    index("intelligence_channel_files_delivery_idx").on(table.deliveryId),
+  ],
 );
 
 /**
