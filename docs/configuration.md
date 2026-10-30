@@ -25,13 +25,22 @@ bash scripts/start.sh
 | `CPK_INTELLIGENCE_API_KEY` | Key the server presents to the platform, and the built-in platform compares it exactly. The example value is a laptop placeholder; set a random one on a deployment other people can reach. |
 | `INTELLIGENCE_API_KEY` | Legacy runtime key; used when `CPK_INTELLIGENCE_API_KEY` is empty or absent. |
 
-In this fork the Intelligence platform is built into the server: one process, the same Postgres.
-The defaults above need no account and no second container; the values shown in `.env.example`
-point at the server itself.
+The Intelligence platform is built into the server: one process, the same Postgres. The defaults
+above need no account and no second container — the values shown in `.env.example` point at the
+server itself — and the `openbot` Learning container is created by the migrations.
 
-All five above stop server startup if missing. The three `INTELLIGENCE_` values are additionally
-checked as a set, so a partial set is refused as a misconfiguration rather than treated as
-unconfigured.
+`DATABASE_URL` and `KEY_ENCRYPTION_KEY` stop server startup if missing. The three `INTELLIGENCE_`
+values default instead, and one of them refuses the default in a particular deployment:
+
+- the two addresses fall back to this server's own `/api/intelligence` and
+  `/api/intelligence-gateway`, on `PORT` or `SERVER_PORT`. Setting either points the runtime at a
+  different Intelligence; the built-in one is still mounted, and still guarded by the key.
+- `CPK_INTELLIGENCE_API_KEY` falls back to the placeholder `.env.example` ships. That placeholder is
+  the whole credential on the built-in platform — behind it, every thread and memory route trusts
+  the `x-cpki-user-id` header, so one key covers every person's conversations — so a deployment with
+  a sign-in provider **refuses to start** with it and asks for a random value. A deployment running
+  as `OPENBOT_SINGLE_USER` with no sign-in accepts it, because nothing it protects was closed there
+  in the first place: `OPENBOT_SINGLE_USER` already refuses any address beyond this machine.
 
 `COPILOTKIT_LICENSE_TOKEN` is optional: managed Intelligence issues no licence token, and a
 self-hosted Intelligence that has one sets this and has it forwarded to the runtime. That
@@ -1228,6 +1237,8 @@ model:
 ```
 
 `provider` must be `openai` or `anthropic`. `credential_secret_ref` is a reference to a stored credential, not a credential value. `default_model` is passed through as written, so an OpenAI-compatible endpoint reached through `OPENAI_BASE_URL` takes the name that endpoint publishes.
+
+`reasoning_effort` is optional, and only read for `provider: openai`: it is forwarded to the built-in Bots' model as the provider's effort setting (`low`, `medium`, `high`, or whatever that endpoint publishes). Unset leaves the provider's default, which is the right answer for most models — a reasoning model that defaults to its hardest setting can spend minutes on a one-line reply, and this is the knob for that. It does not reach a Bot that serves its own AG-UI endpoint, because that Bot calls its own model.
 
 At start-up the server asks OpenAI or Anthropic, once, whether the configured key can call `default_model`. A key that cannot (a project key whose model allowlist leaves it out, say) would otherwise fail at the first message; instead the log says `model-unavailable`, naming the model and the fix. A rejected key logs `model-credential-rejected`. Nothing is asked with no key configured yet, or of an endpoint set by `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`, and start-up never waits for the answer.
 

@@ -8,7 +8,7 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
 
 ## Unreleased
 
-**Before upgrading.** Sixteen things change for an existing deployment:
+**Before upgrading.** Seventeen things change for an existing deployment:
 - Bots now share one computer per person instead of each having its own. Migration
   `0069_isolated_bots` adds `agent_profiles.isolated`, off for every existing Bot. With the
   supervisor (laptop, Desktop, Compose), a person's computer is created the first time one of their
@@ -77,6 +77,36 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
   In the all-in-one image that share counts the database and the API server too.
   `COMPUTER_MEMORY_HIGH_PERCENT=0` and `COMPUTER_TAB_IDLE_MS=0` (Helm: `computers.memoryHighPercent`
   and `computers.tabIdleMs`) keep the old behaviour.
+- The Intelligence platform now runs inside the server, on the Postgres OpenBot already uses:
+  threads, event history, memories, Learning containers and the realtime gateway, in migrations
+  `0070_local_intelligence` to `0073_intelligence_user_join_codes` (nine tables; nothing existing
+  changes). A deployment that names `INTELLIGENCE_API_URL` and `INTELLIGENCE_GATEWAY_WS_URL` keeps
+  using what it named, so managed and self-hosted Intelligence work as before; unset, the defaults
+  point at the server itself and need no account. `CPK_INTELLIGENCE_API_KEY` no longer has a missing
+  case: on a deployment with a sign-in provider, the placeholder `.env.example` ships now **stops
+  start-up**, because the built-in platform compares that key exactly and trusts the
+  `x-cpki-user-id` header behind it, so one key covers every person's conversations. Set a random
+  value (`openssl rand -hex 32`). `OPENBOT_SINGLE_USER` deployments are unchanged.
+
+### Intelligence runs inside the server
+
+Threads, message history, memories, Learning containers and the realtime gateway were three
+CopilotKit-hosted services: `api.intelligence.copilotkit.ai`, `realtime.intelligence.copilotkit.ai`,
+and the licence that gated memory. They are now one module inside this server, backed by the same
+Postgres, speaking the same wire protocol — the runtime and the browser talk to it without knowing
+the difference, and the `@copilotkit/*` packages stay as they were, because those run in-process.
+
+There is nothing to sign up for and no second container. The two addresses default to
+`/api/intelligence` and `/api/intelligence-gateway` on the server's own port, the `openbot` Learning
+container is created by the migrations, and entitlement is answered locally. Naming the addresses
+still points the runtime at managed Intelligence, or at your own copy of it.
+
+What it does not do is worth knowing before you lean on it. Memory recall is lexical — Postgres full
+text plus a substring pass — rather than embedding-based. The Learning engine is not implemented:
+containers and Skill snapshots are served, so published skills work, but container runs answer
+"unavailable" and candidate review answers empty. Trajectory capture mints its join token and relays
+the stream without storing it. And it is single-instance by design, with in-process fan-out and no
+Redis, which is the shape a laptop deployment has.
 
 ### A computer closes browsers nobody is using when its memory runs high
 
