@@ -351,6 +351,44 @@ export function createIntelligenceRestRoutes(
     return c.json({ id: c.req.param("clientEventId"), duplicate: false });
   });
 
+  // ---- trajectory capture (Phase 2) ---------------------------------------
+
+  /** Mint a Trajectory capture join; the browser streams on `trajectory:{id}`. */
+  app.post("/api/trajectories/join", async (c) => {
+    const body = await c.req.json<{
+      trajectoryId: string;
+      appUserId?: string;
+    }>();
+    const joinToken = await store.joinTrajectory(body.trajectoryId);
+    return c.json({ joinToken, trajectoryId: body.trajectoryId });
+  });
+
+  // ---- managed-channel files (Phase 2) -------------------------------------
+
+  /** One stored asset, for history hydration (`ɵgetManagedChannelAsset`). */
+  app.get("/api/channels/files/:assetId", async (c) => {
+    const file = await store.getChannelFile(c.req.param("assetId"));
+    if (!file) return c.body(null, 404);
+    return new Response(new Uint8Array(file.bytes), {
+      headers: { "content-type": file.mimeType },
+    });
+  });
+
+  /** A delivery's outbound file, stored for the provider relay to pick up. */
+  app.post("/api/channels/deliveries/:deliveryId/files", async (c) => {
+    const filename = c.req.query("filename");
+    const handle = await store.saveChannelFile({
+      deliveryId: c.req.param("deliveryId"),
+      operationId: c.req.query("operationId") ?? undefined,
+      filename: filename ?? undefined,
+      title: c.req.query("title") ?? undefined,
+      altText: c.req.query("altText") ?? undefined,
+      mimeType: c.req.header("content-type") ?? undefined,
+      bytes: Buffer.from(await c.req.arrayBuffer()),
+    });
+    return c.json({ handle });
+  });
+
   // ---- learning (Phase 3: containers from the table, runs/candidates pages) --
 
   app.get("/api/v1/learning/containers", async (c) => {

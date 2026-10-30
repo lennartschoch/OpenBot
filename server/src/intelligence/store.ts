@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
 import {
+  intelligenceChannelFiles,
   intelligenceJoinTokens,
   intelligenceLearningContainers,
   intelligenceMemories,
@@ -367,7 +368,7 @@ export class IntelligenceStore {
   }
 
   async mintToken(
-    kind: "thread" | "user_threads" | "user_memories",
+    kind: "thread" | "user_threads" | "user_memories" | "trajectory",
     scope: string,
   ): Promise<string> {
     const token = randomUUID();
@@ -376,12 +377,19 @@ export class IntelligenceStore {
       .values({
         token,
         kind,
-        threadId: kind === "thread" ? scope : null,
-        userId: kind === "thread" ? null : scope,
+        threadId:
+          kind === "thread" || kind === "trajectory" ? scope : null,
+        userId: kind === "thread" || kind === "trajectory" ? null : scope,
         expiresAt: new Date(Date.now() + JOIN_TOKEN_TTL_MS),
       })
       .onConflictDoNothing();
     return token;
+  }
+
+  /** Mint a Trajectory capture join: the browser streams events on the
+   * gateway's `trajectory:{id}` topic, scoped to this trajectory. */
+  async joinTrajectory(trajectoryId: string): Promise<string> {
+    return this.mintToken("trajectory", trajectoryId);
   }
 
   /** Whether a join token authorizes a topic. Tokens name their scope, so a token
@@ -400,6 +408,9 @@ export class IntelligenceStore {
     if (!row || row.expiresAt.getTime() < Date.now()) return { ok: false };
     if (row.kind === "thread") {
       return { ok: row.threadId === topic.replace(/^thread:/, "") };
+    }
+    if (row.kind === "trajectory") {
+      return { ok: row.threadId === topic.replace(/^trajectory:/, "") };
     }
     if (topic.startsWith("user_meta:memories:")) {
       return { ok: row.kind === "user_memories", userId: row.userId ?? undefined };
@@ -565,5 +576,51 @@ export class IntelligenceStore {
 
   async listContainers() {
     return this.db.select().from(intelligenceLearningContainers);
+  }
+
+  // ---- managed-channel files ----------------------------------------------
+
+  /** Store one managed-channel file; the handle is its asset id. */
+  async saveChannelFile(input: {
+    deliveryId?: string;
+    operationId?: string;
+    filename?: string;
+    title?: string;
+    altText?: string;
+    mimeType?: string;
+    bytes: Buffer;
+  }): Promise<string> {
+    const [row] = await this.db
+      .insert(intelligenceChannelFiles)
+      .values({
+        deliveryId: input.deliveryId ?? null,
+        operationId: input.operationId ?? null,
+        filename: input.filename ?? null,
+        title: input.title ?? null,
+        altText: input.altText ?? null,
+        mimeType: input.mimeType ?? null,
+        bytes: input.bytes,
+      })
+      .returning({ handle: intelligenceChannelFiles.handle });
+    return row.handle;
+  }
+
+  /** Read one managed-channel file back (the runtime's history hydration). */
+  async getChannelFile(handle: string): Promise<{
+    bytes: Buffer;
+    mimeType: string;
+    filename: string | null;
+  } | null> {
+    const [row] = await this.db
+      .select()
+      .from(intelligenceChannelFiles)
+      .where(eq(intelligenceChannelFiles.handle, handle))
+      .limit(1);
+    if (!row) return null;
+    return {
+      bytes: row.bytes,
+      mimeType: row.mimeType ?? "application/octet-stream",
+      filename: row.filename,
+    };
   }
 }

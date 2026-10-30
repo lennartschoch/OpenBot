@@ -9,6 +9,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { customType } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { jsonb } from "./json";
 
 /** `bytea` column, same custom type as `core.ts` uses for its blobs. */
@@ -100,6 +101,30 @@ export const intelligenceJoinTokens = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
   (table) => [index("intelligence_join_tokens_thread_idx").on(table.threadId)],
+);
+
+/**
+ * A managed-Channel file: inbound attachments the browser hydrates through
+ * `/api/channels/files/:handle`, and outbound files a delivery uploads.
+ */
+export const intelligenceChannelFiles = pgTable(
+  "intelligence_channel_files",
+  {
+    handle: text("handle")
+      .default(sql`gen_random_uuid()`)
+      .primaryKey(),
+    deliveryId: text("delivery_id"),
+    operationId: text("operation_id"),
+    filename: text("filename"),
+    title: text("title"),
+    altText: text("alt_text"),
+    mimeType: text("mime_type"),
+    bytes: bytea("bytes").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("intelligence_channel_files_delivery_idx").on(table.deliveryId)],
 );
 
 /**

@@ -109,6 +109,9 @@ export class IntelligenceGateway {
         reply(ws, joinRef, ref, topic, {});
         break;
       default:
+        // Every other push is relayed to the topic's other members: the
+        // channels plane's control/delivery exchange, and trajectory streams.
+        this.broadcastFrom(topic, event, payload, ws);
         reply(ws, joinRef, ref, topic, {});
         break;
     }
@@ -124,10 +127,22 @@ export class IntelligenceGateway {
 
   /** Push one event to every socket on a topic (the channel broadcast). */
   broadcast(topic: string, event: string, payload: unknown): void {
+    this.broadcastFrom(topic, event, payload);
+  }
+
+  /** The broadcast, skipping one socket (the push's sender). */
+  private broadcastFrom(
+    topic: string,
+    event: string,
+    payload: unknown,
+    except?: GatewaySocket,
+  ): void {
     const sockets = this.subscribers.get(topic);
     if (!sockets) return;
     const frame = JSON.stringify([null, null, topic, event, payload]);
-    for (const socket of sockets) socket.send(frame);
+    for (const socket of sockets) {
+      if (socket !== except) socket.send(frame);
+    }
   }
 
   /**
@@ -177,6 +192,17 @@ export class IntelligenceGateway {
         topic,
       );
       if (!authorized.ok) {
+        replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
+        return;
+      }
+    }
+    // Trajectory capture streams join with their minted token too.
+    if (data.phoenix === "client" && topic.startsWith("trajectory:")) {
+      const token = data.joinToken;
+      if (
+        typeof token !== "string" ||
+        !(await this.store.authorizeTopic(token, topic)).ok
+      ) {
         replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
         return;
       }
