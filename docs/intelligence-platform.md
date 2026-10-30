@@ -86,7 +86,16 @@ stable, so the thread-list channel has an address that does not change on every 
 
 ## Storage
 
-Nine tables, created by `0070_local_intelligence`:
+Nine tables, created by `0900_local_intelligence`:
+
+> **Why 0900.** Upstream numbers its migrations 0069, 0070, 0071…, so a fork migration at 0070 is a
+> collision waiting for the next upstream release: same file name, same snapshot slot, and a `when`
+> that has to be restamped to sort after theirs — which is the one thing
+> `server/src/db/migration-reach.ts` refuses, because every database that already ran the old stamp
+> would skip the migrations that merged in. The band keeps the fork's numbering out of upstream's
+> way, so nothing here is ever renumbered and no deployment is ever asked to recreate its database.
+> The rule for the next fork-owned migration is the same: take the next `09xx`, and leave its
+> journal `when` alone once it is committed.
 
 - `intelligence_threads` — the summary fields and the folded transcript. The event log is the source;
   `GET …/messages` is one row read because the fold happens at append time.
