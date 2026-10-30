@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IntelligenceStore } from "./store";
 import { EventType } from "@ag-ui/core";
 
@@ -30,6 +31,8 @@ export type PhoenixData = {
   joined: Map<string, string | null>;
   /** The `stream_mode` each joined thread topic asked for, keyed by topic. */
   streamModes?: Map<string, string | undefined>;
+  /** Topics this socket already spent a join token on, so a rejoin still works. */
+  authorized?: Set<string>;
   /** The socket-level `join_token` the Phoenix client puts on the connect URL. */
   joinToken?: string;
   /** The runner plane's bearer key, carried as the socket's `token` param. */
@@ -52,7 +55,11 @@ const TOKEN_TOPICS = ["thread:", "trajectory:", "user_meta:"];
 export class IntelligenceGateway {
   private readonly subscribers = new Map<string, Set<GatewaySocket>>();
 
-  constructor(private readonly store: IntelligenceStore) {}
+  constructor(
+    private readonly store: IntelligenceStore,
+    /** The deployment key the runner plane and the channels plane must present. */
+    private readonly apiKey: string,
+  ) {}
 
   /** Build the socket state for a fresh upgrade, from its connect params. */
   socketData(plane: PhoenixData["phoenix"], request: Request): PhoenixData {
@@ -75,6 +82,7 @@ export class IntelligenceGateway {
       phoenix: plane,
       joined: new Map(),
       streamModes: new Map(),
+      authorized: new Set(),
       joinToken: clean(url.searchParams.get("join_token")),
       token: runnerToken,
       // The subprotocol the server echoes back: Phoenix clients announce
@@ -129,6 +137,7 @@ export class IntelligenceGateway {
     }
     data.joined.clear();
     data.streamModes?.clear();
+    data.authorized?.clear();
   }
 
   /** Push one event to every socket on a topic (the channel broadcast). */
@@ -170,15 +179,10 @@ export class IntelligenceGateway {
     event: string,
     payload: unknown,
   ): Promise<void> {
-    const tokens = await this.store.liveTokens(
-      userId,
-      channel === "threads" ? "user_threads" : "user_memories",
-    );
-    for (const token of tokens) {
-      const topic =
-        channel === "threads" ? `user_meta:${token}` : `user_meta:memories:${token}`;
-      this.broadcast(topic, event, payload);
-    }
+    const code = await this.store.ensureJoinCode(userId);
+    const topic =
+      channel === "threads" ? `user_meta:${code}` : `user_meta:memories:${code}`;
+    this.broadcast(topic, event, payload);
   }
 
   // ---- joins --------------------------------------------------------------
@@ -195,19 +199,48 @@ export class IntelligenceGateway {
       console.log(
         `[gateway] join ${topic} plane=${data.phoenix} token=${data.joinToken ?? "none"}`,
       );
-    // Authorize: runner joins need no per-thread token (the socket's bearer
-    // key is the deployment's); client joins carry the minted join token, put
-    // on the socket URL by the Phoenix client's connect params. Tokens name
-    // their scope, so a thread's token cannot join another thread's channel.
-    if (data.phoenix === "client" && TOKEN_TOPICS.some((p) => topic.startsWith(p))) {
+    // The runner plane is the deployment's own process: it presents the
+    // platform key and may only write into an ingestion channel. The client
+    // plane presents a minted join token, once, for the one channel it names.
+    if (data.phoenix === "runner") {
+      if (!sameSecret(data.token, this.apiKey)) {
+        replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
+        return;
+      }
+      if (!topic.startsWith("ingestion:")) {
+        replyError(ws, joinRef, ref, topic, { reason: "unmatched topic" });
+        return;
+      }
+    }
+    if (data.phoenix === "client") {
+      const allowed =
+        topic.startsWith("thread:") ||
+        topic.startsWith("trajectory:") ||
+        topic.startsWith("user_meta:");
+      if (!allowed) {
+        replyError(ws, joinRef, ref, topic, { reason: "unmatched topic" });
+        return;
+      }
+    }
+    if (data.phoenix === "channels" && !sameSecret(data.token, this.apiKey)) {
+      replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
+      return;
+    }
+    if (
+      data.phoenix === "client" &&
+      TOKEN_TOPICS.some((p) => topic.startsWith(p)) &&
+      !data.authorized?.has(topic)
+    ) {
       const token = data.joinToken;
       const authorized =
         typeof token === "string" &&
-        (await this.store.authorizeTopic(token, topic)).ok;
+        (await this.store.authorizeAndConsumeTopic(token, topic)).ok;
       if (!authorized) {
         replyError(ws, joinRef, ref, topic, { reason: "unauthorized" });
         return;
       }
+      data.authorized ??= new Set();
+      data.authorized.add(topic);
     }
     data.joined.set(topic, joinRef);
     if (topic.startsWith("thread:")) {
@@ -291,6 +324,10 @@ export class IntelligenceGateway {
     payload: Record<string, unknown>,
   ): Promise<void> {
     const data = ws.data as SocketData;
+    if (data.phoenix !== "runner") {
+      replyError(ws, null, ref, ingestionTopic, { reason: "unauthorized" });
+      return;
+    }
     const joinRef = data.joined.get(ingestionTopic) ?? null;
     const runId = ingestionTopic.slice("ingestion:".length);
     const events = Array.isArray(payload.events)
@@ -456,6 +493,14 @@ function replyError(
   ws.send(
     JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "error", response }]),
   );
+}
+
+/** Compare a presented secret to the deployment key without leaking its prefix. */
+function sameSecret(presented: string | undefined, expected: string): boolean {
+  if (typeof presented !== "string") return false;
+  const left = Buffer.from(presented);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 const seqOf = (event: Record<string, unknown>): number => {

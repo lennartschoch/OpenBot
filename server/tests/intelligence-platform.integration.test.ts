@@ -12,11 +12,13 @@ import { TEST_POOL, testDatabaseUrl } from "./support/database";
  */
 
 const API_KEY = "integration-key";
+const SERVICE_TOKEN = "service-token";
 
 function intelligence() {
   return createLocalIntelligence({
     database: createDatabase(testDatabaseUrl(), TEST_POOL),
     apiKey: API_KEY,
+    serviceToken: SERVICE_TOKEN,
   });
 }
 
@@ -49,7 +51,7 @@ describe("threads, locks and join codes", () => {
       method: "POST",
       body: JSON.stringify({ threadId, userId: "u1", agentId: "a1" }),
     });
-    expect(created.status).toBe(200);
+    expect(created.status).toBe(201);
     expect(created.body.thread.id).toBe(threadId);
     expect(created.body.thread.createdById).toBe("u1");
 
@@ -61,7 +63,7 @@ describe("threads, locks and join codes", () => {
 
     const renamed = await call(app, `/api/threads/${threadId}`, {
       method: "PATCH",
-      body: JSON.stringify({ name: "Renamed" }),
+      body: JSON.stringify({ userId: "u1", agentId: "a1", name: "Renamed" }),
     });
     expect(renamed.body.thread.name).toBe("Renamed");
 
@@ -73,8 +75,12 @@ describe("threads, locks and join codes", () => {
     // The thread-list meta channel's credential rides the page.
     expect(typeof listed.body.joinCode).toBe("string");
 
-    const gone = await call(app, `/api/threads/${threadId}`, { method: "DELETE" });
+    const gone = await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId: "u1", agentId: "a1" }),
+    });
     expect(gone.status).toBe(200);
+    expect(gone.body.deleted.id).toBe(threadId);
   });
 
   test("the lock is exclusive until its run finishes", async () => {
@@ -119,7 +125,7 @@ describe("threads, locks and join codes", () => {
       method: "POST",
       body: JSON.stringify({ threadId: unique(), userId: "u1", agentId: "a1" }),
     });
-    const minted = await call(app, `/api/threads/${body.thread.id}/join-code`);
+    const minted = await call(app, `/api/threads/${body.thread.id}/join-code?userId=u1`);
     expect(minted.status).toBe(200);
     const store = app.gateway.store;
     expect((await store.authorizeTopic(minted.body.joinToken, `thread:${body.thread.id}`)).ok).toBe(true);
@@ -160,7 +166,7 @@ describe("events, fold and the inspector", () => {
     expect(inspect.body.events.length).toBe(events.length);
     expect(inspect.body.events[0].type).toBe("RUN_STARTED");
 
-    const messages = await call(app, `/api/threads/${threadId}/messages`);
+    const messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
     expect(messages.body.messages.at(-1).content).toBe("hello");
 
     // The state fold answers with a snapshot shape (no STATE events: the documented empty answer).
@@ -314,7 +320,8 @@ describe("the gateway relays between planes", () => {
     });
     const gateway = app.gateway;
     const runner = captureSocket();
-    const viewer = captureSocket();
+    const minted = await call(app, `/api/threads/${body.thread.id}/join-code?userId=u1`);
+    const viewer = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
     gateway.handle(viewer, JSON.stringify([null, "1", `thread:${body.thread.id}`, "phx_join", { stream_mode: "run" }]));
     await new Promise((r) => setTimeout(r, 100)); // the join's replay settles first
     const runId = `run-${unique()}`;
@@ -333,8 +340,8 @@ describe("the gateway relays between planes", () => {
 
   test("control pushes relay to the topic's other members", async () => {
     const gateway = app.gateway;
-    const a = captureSocket();
-    const b = captureSocket();
+    const a = captureSocket({ phoenix: "channels" });
+    const b = captureSocket({ phoenix: "channels" });
     gateway.handle(a, JSON.stringify([null, "1", "control", "phx_join", {}]));
     gateway.handle(b, JSON.stringify([null, "1", "control", "phx_join", {}]));
     gateway.handle(a, JSON.stringify([null, "2", "control", "delivery_invitation", { deliveryId: "d1" }]));
@@ -348,6 +355,7 @@ describe("the gateway relays between planes", () => {
 function captureSocket(options: {
   phoenix?: "runner" | "client" | "channels";
   joinToken?: string;
+  token?: string | null;
 } = {}) {
   const frames: string[] = [];
   const socket = {
@@ -355,7 +363,14 @@ function captureSocket(options: {
       phoenix: options.phoenix ?? "runner",
       joined: new Map<string, string | null>(),
       streamModes: new Map<string, string | undefined>(),
+      authorized: new Set<string>(),
       joinToken: options.joinToken,
+      token:
+        options.token !== undefined
+          ? options.token ?? undefined
+          : (options.phoenix ?? "runner") === "client"
+            ? undefined
+            : API_KEY,
     },
     send: (data: string) => void frames.push(data),
     close: () => {},
@@ -401,7 +416,7 @@ describe("the hosted realtime control contract", () => {
       { seq: 1, payload: { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "h1", cpki_event_seq: 1 } } },
       { seq: 2, payload: { type: "RUN_FINISHED", threadId, runId, metadata: { cpki_event_id: "h2", cpki_event_seq: 2 } } },
     ]);
-    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const minted = await call(app, `/api/threads/${threadId}/join-code?userId=u1`);
     const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
     join(client, `thread:${threadId}`, { stream_mode: "run", run_id: runId });
     await wait(150);
@@ -417,7 +432,7 @@ describe("the hosted realtime control contract", () => {
       method: "POST",
       body: JSON.stringify({ runId, userId: "u1", agentId: "a1" }),
     });
-    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const minted = await call(app, `/api/threads/${threadId}/join-code?userId=u1`);
     const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
     join(client, `thread:${threadId}`, { stream_mode: "connect", last_seen_event_id: null });
     await wait(150);
@@ -450,7 +465,7 @@ describe("the hosted realtime control contract", () => {
     await app.store.appendEvents(threadId, runId, [
       { seq: 1, payload: { type: "RUN_STARTED", threadId, runId, metadata: { cpki_event_id: "j1", cpki_event_seq: 1 } } },
     ]);
-    const minted = await call(app, `/api/threads/${threadId}/join-code`);
+    const minted = await call(app, `/api/threads/${threadId}/join-code?userId=u1`);
     const client = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
     join(client, `thread:${threadId}`, { stream_mode: "connect", last_seen_event_id: null });
     await wait(200);
@@ -467,7 +482,7 @@ describe("the hosted realtime control contract", () => {
       { seq: 2, payload: { type: "TEXT_MESSAGE_START", threadId, runId: first, messageId: "a1", role: "assistant", metadata: { cpki_event_id: "k2", cpki_event_seq: 2 } } },
       { seq: 3, payload: { type: "TEXT_MESSAGE_CONTENT", threadId, runId: first, messageId: "a1", delta: "answer one", metadata: { cpki_event_id: "k3", cpki_event_seq: 3 } } },
     ]);
-    let messages = await call(app, `/api/threads/${threadId}/messages`);
+    let messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
     expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1"]);
 
     const second = `run-${unique()}`;
@@ -476,23 +491,26 @@ describe("the hosted realtime control contract", () => {
       { seq: 2, payload: { type: "TEXT_MESSAGE_START", threadId, runId: second, messageId: "a2", role: "assistant", metadata: { cpki_event_id: "l2", cpki_event_seq: 2 } } },
       { seq: 3, payload: { type: "TEXT_MESSAGE_CONTENT", threadId, runId: second, messageId: "a2", delta: "answer two", metadata: { cpki_event_id: "l3", cpki_event_seq: 3 } } },
     ]);
-    messages = await call(app, `/api/threads/${threadId}/messages`);
+    messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
     expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
 
     const third = `run-${unique()}`;
     await app.store.appendEvents(threadId, third, [
       { seq: 1, payload: { type: "RUN_STARTED", threadId, runId: third, input: { messages: [] }, metadata: { cpki_event_id: "m1", cpki_event_seq: 1 } } },
     ]);
-    messages = await call(app, `/api/threads/${threadId}/messages`);
+    messages = await call(app, `/api/threads/${threadId}/messages?userId=u1`);
     expect(messages.body.messages.map((m: any) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
   });
 
   test("run start and finish publish thread_run_activity", async () => {
     const threadId = await thread();
     const listed = await call(app, "/api/threads?userId=u1&agentId=a1");
-    const joinToken = listed.body.joinCode;
-    const meta = captureSocket({ phoenix: "client", joinToken });
-    join(meta, `user_meta:${joinToken}`, {});
+    const subscribed = await call(app, "/api/threads/subscribe", {
+      method: "POST",
+      body: JSON.stringify({ userId: "u1" }),
+    });
+    const meta = captureSocket({ phoenix: "client", joinToken: subscribed.body.joinToken });
+    join(meta, `user_meta:${listed.body.joinCode}`, {});
     await wait(50);
 
     const runId = `run-${unique()}`;
@@ -515,5 +533,169 @@ describe("the hosted realtime control contract", () => {
     expect(activity.map((frame) => frame[4].event_type)).toEqual(["RUN_STARTED", "RUN_FINISHED"]);
     expect(activity[0][4].thread_id).toBe(threadId);
     expect(activity[0][4].run_id).toBe(runId);
+  });
+});
+
+describe("platform authentication and thread ownership", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const replyOf = (socket: ReturnType<typeof captureSocket>) =>
+    socket.frames
+      .map((frame) => JSON.parse(frame) as [unknown, unknown, string, string, any])
+      .filter((frame) => frame[3] === "phx_reply")
+      .at(-1)?.[4];
+
+  async function threadFor(userId: string) {
+    const threadId = unique();
+    const created = await call(app, "/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ threadId, userId, agentId: "a1" }),
+    });
+    expect(created.status).toBe(201);
+    return threadId;
+  }
+
+  test("the service token opens only the Learning container route", async () => {
+    const id = `c-${unique()}`;
+    const created = await call(app, "/api/learning/projects/1/containers", {
+      method: "POST",
+      headers: {
+        Authorization: "",
+        "x-copilotkit-ei-service-token": SERVICE_TOKEN,
+      },
+      body: JSON.stringify({ id, name: "Service" }),
+    });
+    expect(created.status).toBe(201);
+
+    const wrongRoute = await call(app, "/api/threads?userId=u1", {
+      headers: {
+        Authorization: "",
+        "x-copilotkit-ei-service-token": SERVICE_TOKEN,
+      },
+    });
+    expect(wrongRoute.status).toBe(401);
+
+    const wrongToken = await call(app, "/api/learning/projects/1/containers", {
+      method: "POST",
+      headers: {
+        Authorization: "",
+        "x-copilotkit-ei-service-token": "not-the-service-token",
+      },
+      body: JSON.stringify({ id: `c-${unique()}`, name: "Nope" }),
+    });
+    expect(wrongToken.status).toBe(401);
+  });
+
+  test("the runner plane needs the platform key and only joins ingestion topics", async () => {
+    const bad = captureSocket({ phoenix: "runner", token: "wrong" });
+    app.gateway.handle(
+      bad,
+      JSON.stringify([null, "1", "ingestion:run-1", "phx_join", {}]),
+    );
+    await wait(100);
+    expect(replyOf(bad)?.response.reason).toBe("unauthorized");
+
+    const runner = captureSocket({ phoenix: "runner" });
+    app.gateway.handle(
+      runner,
+      JSON.stringify([null, "1", "thread:some-thread", "phx_join", {}]),
+    );
+    await wait(100);
+    expect(replyOf(runner)?.response.reason).toBe("unmatched topic");
+  });
+
+  test("a client token joins one thread once and cannot reach ingestion", async () => {
+    const threadId = await threadFor("u1");
+    const minted = await call(app, `/api/threads/${threadId}/join-code?userId=u1`);
+    const first = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
+    app.gateway.handle(
+      first,
+      JSON.stringify([null, "1", `thread:${threadId}`, "phx_join", { stream_mode: "connect" }]),
+    );
+    await wait(100);
+    expect(JSON.parse(first.frames[0])[3]).toBe("phx_reply");
+    expect(JSON.parse(first.frames[0])[4].status).toBe("ok");
+
+    const second = captureSocket({ phoenix: "client", joinToken: minted.body.joinToken });
+    app.gateway.handle(
+      second,
+      JSON.stringify([null, "1", `thread:${threadId}`, "phx_join", { stream_mode: "connect" }]),
+    );
+    await wait(100);
+    expect(replyOf(second)?.response.reason).toBe("unauthorized");
+
+    const extra = await call(app, `/api/threads/${threadId}/join-code?userId=u1`);
+    const client = captureSocket({ phoenix: "client", joinToken: extra.body.joinToken });
+    app.gateway.handle(
+      client,
+      JSON.stringify([null, "1", "ingestion:any", "phx_join", {}]),
+    );
+    await wait(100);
+    expect(replyOf(client)?.response.reason).toBe("unmatched topic");
+  });
+
+  test("a join code is stable and a token only joins its own code", async () => {
+    const first = await call(app, "/api/threads?userId=u1&agentId=a1");
+    const again = await call(app, "/api/threads?userId=u1&agentId=a1");
+    expect(first.body.joinCode).toBe(again.body.joinCode);
+    expect(first.body.joinToken).toBeUndefined();
+
+    const other = await call(app, "/api/threads?userId=u2&agentId=a1");
+    expect(other.body.joinCode).not.toBe(first.body.joinCode);
+
+    const subscribed = await call(app, "/api/threads/subscribe", {
+      method: "POST",
+      body: JSON.stringify({ userId: "u1" }),
+    });
+    const socket = captureSocket({
+      phoenix: "client",
+      joinToken: subscribed.body.joinToken,
+    });
+    app.gateway.handle(
+      socket,
+      JSON.stringify([null, "1", `user_meta:${other.body.joinCode}`, "phx_join", {}]),
+    );
+    await wait(100);
+    expect(replyOf(socket)?.response.reason).toBe("unauthorized");
+  });
+
+  test("another person's thread is a 404 on every route", async () => {
+    const threadId = await threadFor("u1");
+    const runId = `run-${unique()}`;
+
+    expect((await call(app, `/api/threads/${threadId}`)).status).toBe(400);
+    expect((await call(app, `/api/threads/${threadId}?userId=u2`)).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}/messages?userId=u2`)).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}/join-code?userId=u2`)).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ userId: "u2", agentId: "a1", name: "Mine now" }),
+    })).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId: "u2", agentId: "a1" }),
+    })).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}/lock`, {
+      method: "POST",
+      body: JSON.stringify({ runId, userId: "u2", agentId: "a1" }),
+    })).status).toBe(404);
+    expect((await call(app, `/api/threads/${threadId}/connect`, {
+      method: "POST",
+      body: JSON.stringify({ userId: "u2", agentId: "a1" }),
+    })).status).toBe(404);
+
+    const renamed = await call(app, `/api/threads/${threadId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ userId: "u1", agentId: "a1", name: "Still mine" }),
+    });
+    expect(renamed.body.thread.name).toBe("Still mine");
+    expect((await call(app, "/api/threads?userId=u1")).status).toBe(200);
+    expect((await call(app, "/api/threads")).status).toBe(400);
+    expect((await call(app, `/api/threads/${threadId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ userId: "u1", agentId: "a1" }),
+    })).status).toBe(200);
   });
 });

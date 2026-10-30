@@ -13,12 +13,15 @@ import { IntelligenceStore } from "./store";
 export function createLocalIntelligence(deps: {
   database: Database;
   apiKey: string;
+  /** The project service token, accepted only when creating a Learning container. */
+  serviceToken?: string;
 }) {
   const store = new IntelligenceStore(deps.database);
-  const gateway = new IntelligenceGateway(store);
+  const gateway = new IntelligenceGateway(store, deps.apiKey);
   const rest = createIntelligenceRestRoutes({
     store,
     apiKey: deps.apiKey,
+    serviceToken: deps.serviceToken,
     meta: {
       threads: (userId, payload) => {
         void gateway.broadcastUser(userId, "threads", "thread_metadata", payload);

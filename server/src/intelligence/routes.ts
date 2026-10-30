@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { IntelligenceStore, toMemorySummary, toThreadSummary } from "./store";
 import { foldState } from "./state";
@@ -16,6 +16,8 @@ export type IntelligenceRestDependencies = {
   store: IntelligenceStore;
   /** Shared secret checked against `Authorization: Bearer …`. */
   apiKey: string;
+  /** The project service token, accepted only where a Learning container is created. */
+  serviceToken?: string;
   /** Fan-out to the user's live meta channels (thread list, memories). */
   meta?: {
     threads: (userId: string, payload: Record<string, unknown>) => void;
@@ -54,32 +56,42 @@ export function createIntelligenceRestRoutes(
   const app = new Hono();
 
   app.use("*", async (c, next) => {
-    // The project service token has its own header (the Learning setup job
-    // has no API key), so it is authorized where it is checked.
-    if (c.req.header("x-copilotkit-ei-service-token")) return next();
     const header = c.req.header("authorization") ?? "";
-    if (header !== `Bearer ${apiKey}`) {
-      return c.json({ error: { code: "UNAUTHORIZED", retryable: false } }, 401);
+    if (secretsMatch(header, `Bearer ${apiKey}`)) return next();
+    // The project service token has its own header because the Learning setup
+    // job has no platform key. It is accepted for exactly one route — creating
+    // a Learning container — and is a credential, not a bypass: the header's
+    // presence alone authorizes nothing.
+    if (
+      deps.serviceToken &&
+      c.req.method === "POST" &&
+      /^\/api\/learning\/projects\/[^/]+\/containers$/.test(c.req.path) &&
+      secretsMatch(
+        c.req.header("x-copilotkit-ei-service-token") ?? "",
+        deps.serviceToken,
+      )
+    ) {
+      return next();
     }
-    await next();
+    return c.json({ error: { code: "UNAUTHORIZED", retryable: false } }, 401);
   });
 
   // ---- threads ------------------------------------------------------------
 
   app.get("/api/threads", async (c) => {
     const userId = c.req.query("userId");
-    const agentId = c.req.query("agentId");
-    if (!userId || !agentId)
+    if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
     const threads = await store.listThreads({
       userId,
-      agentId,
+      agentId: c.req.query("agentId") || undefined,
       includeArchived: c.req.query("includeArchived") === "true",
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
     });
-    // The `user_meta` join credentials for this user's thread-list channel.
-    const joinToken = await store.mintToken("user_threads", userId);
-    return c.json({ threads, joinCode: joinToken, joinToken, nextCursor: null });
+    // The stable `user_meta` channel suffix; the join token for it comes from
+    // `/threads/subscribe`, as it does on the hosted platform.
+    const joinCode = await store.ensureJoinCode(userId);
+    return c.json({ threads, joinCode, nextCursor: null });
   });
 
   app.post("/api/threads", async (c) => {
@@ -97,19 +109,32 @@ export function createIntelligenceRestRoutes(
     if (!thread)
       return c.json({ error: { code: "CREATE_FAILED", retryable: true } }, 500);
     deps.meta?.threads(body.userId, threadDelta("created", thread as never));
-    return c.json({ thread });
+    return c.json({ thread }, 201);
   });
 
   app.get("/api/threads/:id", async (c) => {
+    const userId = c.req.query("userId");
+    if (!userId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
     const row = await store.getThread(c.req.param("id"));
-    if (!row) return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+    // Another person's thread does not exist for this caller.
+    if (!row || row.userId !== userId) return notFound(c);
     return c.json({ thread: summary(row) });
   });
 
   app.patch("/api/threads/:id", async (c) => {
-    const body = await c.req.json<{ name?: string | null; archived?: boolean }>();
+    const body = await c.req.json<{
+      userId?: string;
+      agentId?: string;
+      name?: string | null;
+      archived?: boolean;
+    }>();
+    if (!body.userId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const existing = await store.getThread(c.req.param("id"));
+    if (!existing || existing.userId !== body.userId) return notFound(c);
     const row = await store.updateThread(c.req.param("id"), body);
-    if (!row) return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+    if (!row) return notFound(c);
     const thread = summary(row);
     deps.meta?.threads(
       row.userId,
@@ -122,20 +147,28 @@ export function createIntelligenceRestRoutes(
     const body = await c.req
       .json<{ userId?: string; agentId?: string }>()
       .catch(() => ({}) as { userId?: string; agentId?: string });
+    if (!body.userId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
     const existing = await store.getThread(c.req.param("id"));
-    await store.deleteThread(c.req.param("id"));
-    if (existing)
-      deps.meta?.threads(
-        existing.userId,
-        threadDelta(
-          "deleted",
-          summary(existing) as unknown as Record<string, unknown>,
-        ),
-      );
-    return c.json({ ok: true });
+    if (!existing || existing.userId !== body.userId) return notFound(c);
+    const deleted = await store.deleteThread(c.req.param("id"));
+    if (!deleted) return notFound(c);
+    deps.meta?.threads(
+      existing.userId,
+      threadDelta(
+        "deleted",
+        summary(existing) as unknown as Record<string, unknown>,
+      ),
+    );
+    return c.json({ deleted: { id: existing.id } });
   });
 
   app.get("/api/threads/:id/messages", async (c) => {
+    const userId = c.req.query("userId");
+    if (!userId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const row = await store.getThread(c.req.param("id"));
+    if (!row || row.userId !== userId) return notFound(c);
     const messages = await store.getMessages(c.req.param("id"));
     if (c.req.query("fields") === "id")
       return c.json({ messages: messages.map((m) => ({ id: m.id })) });
@@ -145,56 +178,76 @@ export function createIntelligenceRestRoutes(
   // ---- locks, join codes, connect ------------------------------------------
 
   app.post("/api/threads/:id/lock", async (c) => {
+    const threadId = c.req.param("id");
     const body = await c.req.json<{
       runId: string;
       userId: string;
       agentId: string;
-      ttlSeconds?: number;
+      learningContainerId?: string;
     }>();
+    if (!body.runId || !body.userId || !body.agentId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    // Hosted lock and connect create the thread for the caller on first use,
+    // and refuse a thread somebody else owns.
+    const thread = await store.ensureThreadForUser({
+      threadId,
+      userId: body.userId,
+      agentId: body.agentId,
+    });
+    if (!thread) return notFound(c);
     const result = await store.acquireLock({
-      threadId: c.req.param("id"),
+      threadId,
       runId: body.runId,
       userId: body.userId,
       agentId: body.agentId,
-      ttlSeconds: body.ttlSeconds,
     });
     if (!result.acquired)
       return c.json(
-        { error: { code: "THREAD_LOCKED", retryable: false }, runId: result.runId },
+        { error: { code: "THREAD_LOCK_FAILED", retryable: true }, runId: result.runId },
         409,
       );
     return c.json({
-      threadId: c.req.param("id"),
+      threadId,
       runId: result.runId,
       joinToken: result.joinToken,
-      ttlSeconds: body.ttlSeconds ?? 90,
+      ttlSeconds: result.ttlSeconds,
     });
   });
 
   app.patch("/api/threads/:id/lock", async (c) => {
-    const body = await c.req.json<{ runId: string; ttlSeconds: number }>();
-    const { renewed } = await store.renewLock(
-      c.req.param("id"),
-      body.runId,
-      body.ttlSeconds,
-    );
-    if (!renewed) {
-      // The run already reached a terminal event: "completed" is the platform's answer.
+    const body = await c.req.json<{ runId: string; ttlSeconds?: number }>();
+    if (!body.runId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const result = await store.renewLock(c.req.param("id"), body.runId);
+    if (result.status === "conflict") {
+      // Another run holds the thread now. The runner must abort, not carry on
+      // without the lock, so this is a denial rather than a normal finish.
+      return c.json(
+        { error: { code: "THREAD_LOCK_RENEWAL_FAILED", retryable: false } },
+        409,
+      );
+    }
+    if (result.status === "completed") {
       return c.json({ ttlSeconds: 0, status: "completed" });
     }
-    return c.json({ ttlSeconds: body.ttlSeconds, status: "renewed" });
+    return c.json({ ttlSeconds: result.ttlSeconds, status: "renewed" });
   });
 
   app.delete("/api/threads/:id/lock", async (c) => {
     const body = await c.req
       .json<{ runId: string }>()
       .catch(() => ({ runId: "" }));
-    await store.releaseLock(c.req.param("id"), body.runId);
-    return c.json({ ok: true });
+    const released = await store.releaseLock(c.req.param("id"), body.runId);
+    return c.json({ threadId: c.req.param("id"), runId: body.runId, released });
   });
 
   app.get("/api/threads/:id/join-code", async (c) => {
     const threadId = c.req.param("id");
+    const userId = c.req.query("userId");
+    if (!userId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const thread = await store.getThread(threadId);
+    if (!thread || thread.userId !== userId) return notFound(c);
     const joinToken = await store.mintToken("thread", threadId);
     const lock = await store.getLock(threadId);
     const running = lock && lock.expiresAt.getTime() > Date.now();
@@ -210,13 +263,24 @@ export function createIntelligenceRestRoutes(
     const body = await c.req.json<{ userId: string; agentId: string }>().catch(
       () => ({ userId: "", agentId: "" }) as { userId: string; agentId: string },
     );
-    const existing = await store.getThread(threadId);
-    if (!existing) await store.createThread({ threadId, ...body });
+    if (!body.userId || !body.agentId)
+      return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const thread = await store.ensureThreadForUser({
+      threadId,
+      userId: body.userId,
+      agentId: body.agentId,
+    });
+    if (!thread) return notFound(c);
     const lock = await store.getLock(threadId);
     const running = lock && lock.expiresAt.getTime() > Date.now();
-    if (!running) return c.body(null, 204);
+    // Hosted answers with a join grant even when nothing is running; a 204 is
+    // reserved for a caller that asked to connect to something absent.
     const joinToken = await store.mintToken("thread", threadId);
-    return c.json({ threadId, joinToken, runId: lock.runId });
+    return c.json({
+      threadId,
+      joinToken,
+      ...(running ? { runId: lock.runId } : {}),
+    });
   });
 
   app.post("/api/threads/subscribe", async (c) => {
@@ -315,8 +379,9 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+    const joinCode = await store.ensureJoinCode(userId);
     const joinToken = await store.mintToken("user_memories", userId);
-    return c.json({ joinToken, joinCode: joinToken });
+    return c.json({ joinToken, joinCode });
   });
 
   // ---- entitlements, inspector, annotate -------------------------------------
@@ -412,8 +477,6 @@ export function createIntelligenceRestRoutes(
 
   /** A project's service token creates its Learning container (idempotent). */
   app.post("/api/learning/projects/:projectId/containers", async (c) => {
-    const serviceToken = c.req.header("x-copilotkit-ei-service-token");
-    if (!serviceToken) return c.body(null, 401);
     const body = await c.req.json<{ id: string; name: string }>();
     const projectId = Number(c.req.param("projectId"));
     const outcome = await store.createContainer({
@@ -478,3 +541,15 @@ export function createIntelligenceRestRoutes(
 const summary = toThreadSummary;
 
 const memory = toMemorySummary;
+
+/** Another person's thread (or a thread that is not there) is the same 404. */
+function notFound(c: { json: (body: unknown, status: 404) => Response }) {
+  return c.json({ error: { code: "NOT_FOUND", retryable: false } }, 404);
+}
+
+/** Compare two secrets without an early exit that leaks their common prefix. */
+function secretsMatch(presented: string, expected: string): boolean {
+  const left = Buffer.from(presented);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}

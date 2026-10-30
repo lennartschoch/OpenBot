@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
 import {
   intelligenceChannelFiles,
@@ -11,6 +11,7 @@ import {
   intelligenceThreadEvents,
   intelligenceThreadLocks,
   intelligenceThreads,
+  intelligenceUserJoinCodes,
 } from "../db/schema/intelligence";
 import { foldEventsToMessages } from "./messages";
 
@@ -88,6 +89,8 @@ export function toMemorySummary(row: MemoryRow, score?: number) {
 }
 
 const JOIN_TOKEN_TTL_MS = 60 * 60_000;
+/** The hosted platform answers every lock acquisition with this TTL, whatever was asked. */
+const LOCK_TTL_SECONDS = 120;
 
 export class IntelligenceStore {
   constructor(private readonly db: Database) {}
@@ -96,14 +99,14 @@ export class IntelligenceStore {
 
   async listThreads(input: {
     userId: string;
-    agentId: string;
+    agentId?: string;
     includeArchived?: boolean;
     limit?: number;
   }) {
-    const conditions = [
-      eq(intelligenceThreads.userId, input.userId),
-      eq(intelligenceThreads.agentId, input.agentId),
-    ];
+    const conditions = [eq(intelligenceThreads.userId, input.userId)];
+    if (input.agentId) {
+      conditions.push(eq(intelligenceThreads.agentId, input.agentId));
+    }
     if (!input.includeArchived) conditions.push(eq(intelligenceThreads.archived, false));
     const rows = await this.db
       .select()
@@ -121,6 +124,32 @@ export class IntelligenceStore {
       .where(eq(intelligenceThreads.id, threadId))
       .limit(1);
     return row;
+  }
+
+  /**
+   * The thread, created for this user when it does not exist yet; null when it
+   * belongs to somebody else. Hosted connect and lock both create the thread
+   * for the caller on first use, and both refuse another user's thread.
+   */
+  async ensureThreadForUser(input: {
+    threadId: string;
+    userId: string;
+    agentId: string;
+  }): Promise<ThreadRow | null> {
+    const existing = await this.getThread(input.threadId);
+    if (existing) return existing.userId === input.userId ? existing : null;
+    const [created] = await this.db
+      .insert(intelligenceThreads)
+      .values({
+        id: input.threadId,
+        userId: input.userId,
+        agentId: input.agentId,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (created) return created;
+    const raced = await this.getThread(input.threadId);
+    return raced && raced.userId === input.userId ? raced : null;
   }
 
   async createThread(input: {
@@ -159,13 +188,24 @@ export class IntelligenceStore {
     return row;
   }
 
-  async deleteThread(threadId: string) {
-    await this.db
-      .delete(intelligenceThreads)
-      .where(eq(intelligenceThreads.id, threadId));
-    await this.db
-      .delete(intelligenceThreadEvents)
-      .where(eq(intelligenceThreadEvents.threadId, threadId));
+  async deleteThread(threadId: string): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .delete(intelligenceThreads)
+        .where(eq(intelligenceThreads.id, threadId))
+        .returning({ id: intelligenceThreads.id });
+      if (!row) return false;
+      await tx
+        .delete(intelligenceThreadEvents)
+        .where(eq(intelligenceThreadEvents.threadId, threadId));
+      await tx
+        .delete(intelligenceThreadLocks)
+        .where(eq(intelligenceThreadLocks.threadId, threadId));
+      await tx
+        .delete(intelligenceJoinTokens)
+        .where(eq(intelligenceJoinTokens.threadId, threadId));
+      return true;
+    });
   }
 
   // ---- events and messages ------------------------------------------------
@@ -319,70 +359,90 @@ export class IntelligenceStore {
   /**
    * Take the thread's run lock, or report the run that holds it.
    *
-   * A lock is taken by its previous expiry, one compare: a single server cannot fight
-   * itself, so no fencing token. A lock whose run never finished expires on its TTL.
+   * One statement, so two concurrent requests cannot both read "no lock" and
+   * both take it: the conflict clause only rewrites a row this run already
+   * holds or one whose TTL has passed. The TTL is the platform's, not the
+   * caller's: hosted answers every acquisition with 120 seconds.
    */
   async acquireLock(input: {
     threadId: string;
     runId: string;
     userId: string;
     agentId: string;
-    ttlSeconds?: number;
-  }): Promise<{ acquired: boolean; runId?: string; joinToken?: string }> {
-    const expiresAt = new Date(
-      Date.now() + (input.ttlSeconds ?? 90) * 1000,
-    );
-    const [existing] = await this.db
-      .select()
-      .from(intelligenceThreadLocks)
-      .where(eq(intelligenceThreadLocks.threadId, input.threadId))
-      .limit(1);
-    if (existing && existing.expiresAt.getTime() > Date.now() && existing.runId !== input.runId) {
-      return { acquired: false, runId: existing.runId };
+  }): Promise<
+    | { acquired: true; runId: string; joinToken: string; ttlSeconds: number }
+    | { acquired: false; runId?: string }
+  > {
+    const expiresAt = new Date(Date.now() + LOCK_TTL_SECONDS * 1000);
+    const result = await this.db.execute(sql`
+      insert into intelligence_thread_locks
+        (thread_id, run_id, user_id, agent_id, expires_at)
+      values
+        (${input.threadId}, ${input.runId}, ${input.userId}, ${input.agentId}, ${expiresAt})
+      on conflict (thread_id) do update
+        set run_id = excluded.run_id,
+            user_id = excluded.user_id,
+            agent_id = excluded.agent_id,
+            expires_at = excluded.expires_at
+        where intelligence_thread_locks.run_id = excluded.run_id
+           or intelligence_thread_locks.expires_at <= now()
+      returning run_id
+    `);
+    const rows = Array.isArray(result)
+      ? result
+      : ((result as { rows?: unknown[] }).rows ?? []);
+    if (rows.length === 0) {
+      const lock = await this.getLock(input.threadId);
+      return { acquired: false, runId: lock?.runId };
     }
-    await this.db
-      .insert(intelligenceThreadLocks)
-      .values({
-        threadId: input.threadId,
-        runId: input.runId,
-        userId: input.userId,
-        agentId: input.agentId,
-        expiresAt,
-      })
-      .onConflictDoUpdate({
-        target: intelligenceThreadLocks.threadId,
-        set: { runId: input.runId, userId: input.userId, agentId: input.agentId, expiresAt },
-      });
     return {
       acquired: true,
       runId: input.runId,
       joinToken: await this.mintToken("thread", input.threadId),
+      ttlSeconds: LOCK_TTL_SECONDS,
     };
   }
 
-  async renewLock(threadId: string, runId: string, ttlSeconds?: number) {
+  /**
+   * Renew the run's lock. `completed` is the platform's answer once the run
+   * released it; `conflict` means another run holds the thread now, which the
+   * caller must treat as a lost lock rather than a normal finish.
+   */
+  async renewLock(
+    threadId: string,
+    runId: string,
+  ): Promise<
+    | { status: "renewed"; ttlSeconds: number }
+    | { status: "completed" }
+    | { status: "conflict" }
+  > {
     const [row] = await this.db
       .update(intelligenceThreadLocks)
-      .set({ expiresAt: new Date(Date.now() + (ttlSeconds ?? 90) * 1000) })
+      .set({ expiresAt: new Date(Date.now() + LOCK_TTL_SECONDS * 1000) })
       .where(
         and(
           eq(intelligenceThreadLocks.threadId, threadId),
           eq(intelligenceThreadLocks.runId, runId),
         ),
       )
-      .returning();
-    return { renewed: Boolean(row) };
+      .returning({ threadId: intelligenceThreadLocks.threadId });
+    if (row) return { status: "renewed", ttlSeconds: LOCK_TTL_SECONDS };
+    const lock = await this.getLock(threadId);
+    return lock ? { status: "conflict" } : { status: "completed" };
   }
 
-  async releaseLock(threadId: string, runId: string) {
-    await this.db
+  /** Release the lock if this run holds it; false when it did not. */
+  async releaseLock(threadId: string, runId: string): Promise<boolean> {
+    const [row] = await this.db
       .delete(intelligenceThreadLocks)
       .where(
         and(
           eq(intelligenceThreadLocks.threadId, threadId),
           eq(intelligenceThreadLocks.runId, runId),
         ),
-      );
+      )
+      .returning({ threadId: intelligenceThreadLocks.threadId });
+    return Boolean(row);
   }
 
   /** The lock held right now, past its TTL or not. */
@@ -395,12 +455,48 @@ export class IntelligenceStore {
     return row;
   }
 
-  // ---- join tokens --------------------------------------------------------
+  // ---- join tokens and meta channels --------------------------------------
+
+  /**
+   * The person's stable meta-channel suffix. Hosted returns the same joinCode
+   * on every list request; a code minted per request made the client tear down
+   * and rejoin its thread-list channel on every page load.
+   */
+  async ensureJoinCode(userId: string): Promise<string> {
+    const [existing] = await this.db
+      .select({ code: intelligenceUserJoinCodes.code })
+      .from(intelligenceUserJoinCodes)
+      .where(eq(intelligenceUserJoinCodes.userId, userId))
+      .limit(1);
+    if (existing) return existing.code;
+    const code = randomUUID();
+    const [created] = await this.db
+      .insert(intelligenceUserJoinCodes)
+      .values({ userId, code })
+      .onConflictDoNothing()
+      .returning({ code: intelligenceUserJoinCodes.code });
+    if (created) return created.code;
+    const [raced] = await this.db
+      .select({ code: intelligenceUserJoinCodes.code })
+      .from(intelligenceUserJoinCodes)
+      .where(eq(intelligenceUserJoinCodes.userId, userId))
+      .limit(1);
+    return raced.code;
+  }
+
+  /** Drop tokens nobody can use any more; every mint is a chance to do it. */
+  private async pruneExpiredJoinTokens(): Promise<void> {
+    await this.db
+      .delete(intelligenceJoinTokens)
+      .where(lt(intelligenceJoinTokens.expiresAt, new Date()));
+  }
 
   async mintToken(
     kind: "thread" | "user_threads" | "user_memories" | "trajectory",
     scope: string,
   ): Promise<string> {
+    await this.pruneExpiredJoinTokens();
+    const isUser = kind === "user_threads" || kind === "user_memories";
     const token = randomUUID();
     await this.db
       .insert(intelligenceJoinTokens)
@@ -409,7 +505,8 @@ export class IntelligenceStore {
         kind,
         threadId:
           kind === "thread" || kind === "trajectory" ? scope : null,
-        userId: kind === "thread" || kind === "trajectory" ? null : scope,
+        userId: isUser ? scope : null,
+        code: isUser ? await this.ensureJoinCode(scope) : null,
         expiresAt: new Date(Date.now() + JOIN_TOKEN_TTL_MS),
       })
       .onConflictDoNothing();
@@ -422,9 +519,11 @@ export class IntelligenceStore {
     return this.mintToken("trajectory", trajectoryId);
   }
 
-  /** Whether a join token authorizes a topic. Tokens name their scope, so a token
-   * minted for one thread cannot join another's channel, and a thread-list token
-   * cannot join the memories channel. */
+  /**
+   * Whether a join token authorizes a topic. Tokens name their scope, so a token
+   * minted for one thread cannot join another's channel, and a user_meta token
+   * names the one person whose channel it may join.
+   */
   async authorizeTopic(
     token: string | null,
     topic: string,
@@ -437,36 +536,43 @@ export class IntelligenceStore {
       .limit(1);
     if (!row || row.expiresAt.getTime() < Date.now()) return { ok: false };
     if (row.kind === "thread") {
-      return { ok: row.threadId === topic.replace(/^thread:/, "") };
+      return { ok: row.threadId === topic.slice("thread:".length) };
     }
     if (row.kind === "trajectory") {
-      return { ok: row.threadId === topic.replace(/^trajectory:/, "") };
+      return { ok: row.threadId === topic.slice("trajectory:".length) };
     }
-    if (topic.startsWith("user_meta:memories:")) {
-      return { ok: row.kind === "user_memories", userId: row.userId ?? undefined };
+    if (row.kind === "user_threads") {
+      return {
+        ok: Boolean(row.code) && topic === `user_meta:${row.code}`,
+        userId: row.userId ?? undefined,
+      };
     }
-    if (topic.startsWith("user_meta:")) {
-      return { ok: row.kind === "user_threads", userId: row.userId ?? undefined };
+    if (row.kind === "user_memories") {
+      return {
+        ok: Boolean(row.code) && topic === `user_meta:memories:${row.code}`,
+        userId: row.userId ?? undefined,
+      };
     }
-    return { ok: true };
+    return { ok: false };
   }
 
-  /** Not-yet-expired join tokens of a user's meta channel of a kind. */
-  async liveTokens(
-    userId: string,
-    kind: "user_threads" | "user_memories",
-  ): Promise<string[]> {
-    const rows = await this.db
-      .select({ token: intelligenceJoinTokens.token })
-      .from(intelligenceJoinTokens)
-      .where(
-        and(
-          eq(intelligenceJoinTokens.userId, userId),
-          eq(intelligenceJoinTokens.kind, kind),
-          sql`${intelligenceJoinTokens.expiresAt} > now()`,
-        ),
-      );
-    return rows.map((row) => row.token);
+  /**
+   * Authorize and burn the token in one step. Hosted join tokens are single
+   * use: a second socket presenting one is refused. The gateway remembers the
+   * topics a socket has already authorized, so a Phoenix rejoin on the same
+   * socket keeps working after its token row is gone.
+   */
+  async authorizeAndConsumeTopic(
+    token: string | null,
+    topic: string,
+  ): Promise<{ ok: boolean; userId?: string }> {
+    const authorized = await this.authorizeTopic(token, topic);
+    if (!authorized.ok || !token) return authorized;
+    const [row] = await this.db
+      .delete(intelligenceJoinTokens)
+      .where(eq(intelligenceJoinTokens.token, token))
+      .returning({ token: intelligenceJoinTokens.token });
+    return row ? authorized : { ok: false };
   }
 
   // ---- memories -----------------------------------------------------------

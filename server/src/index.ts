@@ -2784,6 +2784,7 @@ const app = createApp(
 const localIntelligence = createLocalIntelligence({
   database,
   apiKey: config.runtime.intelligence.apiKey,
+  serviceToken: config.learningSetup?.serviceToken,
 });
 
 startHttpServer({
