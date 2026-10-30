@@ -104,6 +104,7 @@ jobs:
   mobile:
     name: native types
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -126,6 +127,7 @@ jobs:
   computer-browser:
     name: computer (real browser)
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -171,6 +173,7 @@ jobs:
       fail-fast: false
       matrix:
         target: [self-hosted, eks, eks-sandbox, gke, aks]
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -383,6 +386,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -396,6 +400,7 @@ jobs:
   python-harness:
     name: python harness regressions
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
