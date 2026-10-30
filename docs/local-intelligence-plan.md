@@ -129,7 +129,9 @@ and the Skills batch, `learningContainerId` assignment, scoped memory with grant
 absorption, and an empty Inspector Learning snapshot.
 
 Deliberately not implemented yet: the Learning engine itself (`POST …/runs`, candidate review and
-insight evidence answer unsupported or empty), semantic/hybrid memory recall (the current recall is
+insight evidence answer unsupported or empty), a thread's `learningContainerId` must exist in the
+local container table (the `openbot` container is seeded; others are created through the container
+route), semantic/hybrid memory recall (the current recall is
 lexical `ts_rank` + substring; the `pgvector` extension is no longer installed by the schema), and
 Trajectory persistence (the `/trajectories/join` token is minted and the `trajectory:` topic relays,
 but events are not stored). Tombstoned thread ids and the hosted error envelope (`message`,
