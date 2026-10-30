@@ -65,8 +65,8 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 
 - Docker, for PostgreSQL and the shipped Bots.
 - [Bun](https://bun.sh) 1.4+, for the app, the API server and the tests (some tests fail on 1.3).
-- A CopilotKit Intelligence project and license. This fork ships the Intelligence platform inside
-  the server — one process, the same Postgres — so the defaults in `.env.example` need no account.
+- A CopilotKit Intelligence project and license. OpenBot ships the Intelligence platform inside the
+  server — one process, the same Postgres — so the defaults in `.env.example` need no account.
 - A model key. The proof-of-concept Bot uses OpenAI; the LangGraph Bot can use OpenAI, Anthropic, or Google.
 
 ## Quick start
@@ -116,7 +116,7 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 
 ### Intelligence on your own machine
 
-This fork ships the Intelligence platform inside the server itself: threads, events, memories,
+OpenBot ships the Intelligence platform inside the server itself: threads, events, memories,
 Learning containers and the realtime gateway, all in the Postgres OpenBot already uses. The
 defaults in `.env.example` point at it and need no account.
 
