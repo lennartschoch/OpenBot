@@ -98,9 +98,26 @@ export const intelligenceJoinTokens = pgTable(
     kind: text("kind").notNull(),
     threadId: text("thread_id"),
     userId: text("user_id"),
+    /** The stable user meta channel a `user_threads`/`user_memories` token belongs to. */
+    code: text("code"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
   (table) => [index("intelligence_join_tokens_thread_idx").on(table.threadId)],
+);
+
+/** One stable join code per person, the topic suffix of their meta channels. */
+export const intelligenceUserJoinCodes = pgTable(
+  "intelligence_user_join_codes",
+  {
+    userId: text("user_id").primaryKey(),
+    code: text("code").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("intelligence_user_join_codes_code_idx").on(table.code),
+  ],
 );
 
 /**

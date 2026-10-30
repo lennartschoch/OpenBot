@@ -1,4 +1,4 @@
-CREATE TABLE "intelligence_channel_files" (
+CREATE TABLE IF NOT EXISTS "intelligence_channel_files" (
 	"handle" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"delivery_id" text,
 	"operation_id" text,
@@ -10,4 +10,4 @@ CREATE TABLE "intelligence_channel_files" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "intelligence_channel_files_delivery_idx" ON "intelligence_channel_files" USING btree ("delivery_id");
+CREATE INDEX IF NOT EXISTS "intelligence_channel_files_delivery_idx" ON "intelligence_channel_files" USING btree ("delivery_id");
