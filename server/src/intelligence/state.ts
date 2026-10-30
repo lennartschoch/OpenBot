@@ -4,7 +4,10 @@
  * OpenBot reads it through `getThreadState`.
  */
 
-function applyJsonPatch(state: Record<string, unknown>, patch: { op: string; path: string; value?: unknown }[]) {
+function applyJsonPatch(
+  state: Record<string, unknown>,
+  patch: { op: string; path: string; value?: unknown }[],
+) {
   const next = structuredClone(state);
   for (const op of patch) {
     const parts = op.path.split("/").filter(Boolean);
@@ -33,7 +36,9 @@ export function foldState(
   let skippedDeltas = 0;
   for (const event of events) {
     if (event.type === "STATE_SNAPSHOT") {
-      state = structuredClone((event.snapshot ?? {}) as Record<string, unknown>);
+      state = structuredClone(
+        (event.snapshot ?? {}) as Record<string, unknown>,
+      );
       skippedDeltas = 0;
     } else if (event.type === "STATE_DELTA") {
       if (!state) {

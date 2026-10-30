@@ -65,7 +65,12 @@ export function foldEventsToMessages(
     const at = indexById.get(id);
     const current = at === undefined ? undefined : messages[at];
     if (current && current.role === "assistant") return current;
-    const created: FoldMessage = { id, role: "assistant", content: "", toolCalls: [] };
+    const created: FoldMessage = {
+      id,
+      role: "assistant",
+      content: "",
+      toolCalls: [],
+    };
     replace(created);
     return created;
   };
@@ -117,7 +122,11 @@ export function foldEventsToMessages(
         const at = indexById.get(event.messageId);
         const current = at === undefined ? undefined : messages[at];
         if (!current) {
-          replace({ id: event.messageId, role: "assistant", content: event.delta ?? "" });
+          replace({
+            id: event.messageId,
+            role: "assistant",
+            content: event.delta ?? "",
+          });
           break;
         }
         replace({
@@ -145,7 +154,9 @@ export function foldEventsToMessages(
       case EventType.TOOL_CALL_ARGS: {
         if (!event.toolCallId) break;
         for (const message of messages) {
-          const call = message.toolCalls?.find((c) => c.id === event.toolCallId);
+          const call = message.toolCalls?.find(
+            (c) => c.id === event.toolCallId,
+          );
           if (call) {
             call.function.arguments += event.delta ?? "";
             break;

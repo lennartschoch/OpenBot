@@ -23,19 +23,26 @@ import { foldEventsToMessages } from "./messages";
  */
 export function readArchiveRevision(archive: Buffer): string | null {
   let offset = 0;
-  while (offset + 30 <= archive.length && archive.readUInt32LE(offset) === 0x04034b50) {
+  while (
+    offset + 30 <= archive.length &&
+    archive.readUInt32LE(offset) === 0x04034b50
+  ) {
     const method = archive.readUInt16LE(offset + 8);
     const compressedSize = archive.readUInt32LE(offset + 18);
     const nameLength = archive.readUInt16LE(offset + 26);
     const extraLength = archive.readUInt16LE(offset + 28);
-    const name = archive.subarray(offset + 30, offset + 30 + nameLength).toString();
+    const name = archive
+      .subarray(offset + 30, offset + 30 + nameLength)
+      .toString();
     const dataStart = offset + 30 + nameLength + extraLength;
     if (dataStart + compressedSize > archive.length) return null;
     if (name === "manifest.json") {
       const entry = archive.subarray(dataStart, dataStart + compressedSize);
       const bytes = method === 8 ? inflateRawSync(entry) : entry;
       try {
-        const manifest = JSON.parse(bytes.toString("utf8")) as { revision?: unknown };
+        const manifest = JSON.parse(bytes.toString("utf8")) as {
+          revision?: unknown;
+        };
         return typeof manifest.revision === "string" ? manifest.revision : null;
       } catch {
         return null;
@@ -137,7 +144,10 @@ export class IntelligenceStore {
     includeArchived?: boolean;
     limit?: number;
     cursor?: ThreadCursor;
-  }): Promise<{ threads: ReturnType<typeof toThreadSummary>[]; nextCursor: string | null }> {
+  }): Promise<{
+    threads: ReturnType<typeof toThreadSummary>[];
+    nextCursor: string | null;
+  }> {
     const limit =
       Number.isFinite(input.limit) && (input.limit ?? 0) > 0
         ? Math.min(Math.floor(input.limit!), 500)
@@ -162,7 +172,10 @@ export class IntelligenceStore {
       })
       .from(intelligenceThreads)
       .where(and(...conditions))
-      .orderBy(desc(intelligenceThreads.updatedAt), desc(intelligenceThreads.id))
+      .orderBy(
+        desc(intelligenceThreads.updatedAt),
+        desc(intelligenceThreads.id),
+      )
       .limit(limit + 1);
     const page = rows.slice(0, limit);
     const last = page.at(-1);
@@ -241,7 +254,9 @@ export class IntelligenceStore {
       .update(intelligenceThreads)
       .set({
         ...(updates.name !== undefined ? { name: updates.name } : {}),
-        ...(updates.archived !== undefined ? { archived: updates.archived } : {}),
+        ...(updates.archived !== undefined
+          ? { archived: updates.archived }
+          : {}),
         updatedAt: new Date(),
         ...(updates.name !== undefined ? { lastUpdatedAt: new Date() } : {}),
       })
@@ -607,8 +622,7 @@ export class IntelligenceStore {
       .values({
         token,
         kind,
-        threadId:
-          kind === "thread" || kind === "trajectory" ? scope : null,
+        threadId: kind === "thread" || kind === "trajectory" ? scope : null,
         userId: isUser ? scope : null,
         code: isUser ? await this.ensureJoinCode(scope) : null,
         expiresAt: new Date(Date.now() + JOIN_TOKEN_TTL_MS),
@@ -692,7 +706,9 @@ export class IntelligenceStore {
       .where(
         and(
           eq(intelligenceMemories.userId, userId),
-          ...(includeInvalidated ? [] : [isNull(intelligenceMemories.invalidatedAt)]),
+          ...(includeInvalidated
+            ? []
+            : [isNull(intelligenceMemories.invalidatedAt)]),
           ...(scope ? [eq(intelligenceMemories.scope, scope)] : []),
         ),
       )
@@ -864,7 +880,11 @@ export class IntelligenceStore {
           ),
         ),
       )
-      .orderBy(desc(sql`ts_rank(to_tsvector('english', ${intelligenceMemories.content}), plainto_tsquery('english', ${query}))`))
+      .orderBy(
+        desc(
+          sql`ts_rank(to_tsvector('english', ${intelligenceMemories.content}), plainto_tsquery('english', ${query}))`,
+        ),
+      )
       .limit(limit);
     return rows;
   }
@@ -925,7 +945,9 @@ export class IntelligenceStore {
       .where(
         and(
           eq(intelligenceSkillRevisions.containerId, containerId),
-          ...(revision ? [eq(intelligenceSkillRevisions.revision, revision)] : []),
+          ...(revision
+            ? [eq(intelligenceSkillRevisions.revision, revision)]
+            : []),
         ),
       )
       .orderBy(desc(intelligenceSkillRevisions.publishedAt))

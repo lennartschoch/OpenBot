@@ -1,12 +1,12 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
+import { foldState } from "./state";
 import {
   decodeThreadCursor,
-  IntelligenceStore,
+  type IntelligenceStore,
   toMemorySummary,
   toThreadSummary,
 } from "./store";
-import { foldState } from "./state";
 
 /**
  * The Intelligence REST surface, as `CopilotKitIntelligence` speaks it.
@@ -51,8 +51,9 @@ const memoryDelta = (
   ...(operation === "invalidated" ? { invalidated: { id: memory.id } } : {}),
 });
 
-const requireUser = (c: { req: { header: (name: string) => string | undefined } }) =>
-  c.req.header("x-cpki-user-id");
+const requireUser = (c: {
+  req: { header: (name: string) => string | undefined };
+}) => c.req.header("x-cpki-user-id");
 
 export function createIntelligenceRestRoutes(
   deps: IntelligenceRestDependencies,
@@ -239,7 +240,10 @@ export function createIntelligenceRestRoutes(
     });
     if (!result.acquired)
       return c.json(
-        { error: { code: "THREAD_LOCK_FAILED", retryable: true }, runId: result.runId },
+        {
+          error: { code: "THREAD_LOCK_FAILED", retryable: true },
+          runId: result.runId,
+        },
         409,
       );
     return c.json({
@@ -296,9 +300,12 @@ export function createIntelligenceRestRoutes(
 
   app.post("/api/threads/:id/connect", async (c) => {
     const threadId = c.req.param("id");
-    const body = await c.req.json<{ userId: string; agentId: string }>().catch(
-      () => ({ userId: "", agentId: "" }) as { userId: string; agentId: string },
-    );
+    const body = await c.req
+      .json<{ userId: string; agentId: string }>()
+      .catch(
+        () =>
+          ({ userId: "", agentId: "" }) as { userId: string; agentId: string },
+      );
     if (!body.userId || !body.agentId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
     const thread = await store.ensureThreadForUser({
@@ -378,7 +385,8 @@ export function createIntelligenceRestRoutes(
     const current = await store.getMemory(c.req.param("id"), userId);
     if (!current) return notFound(c);
     const grant = memoryGrant(c);
-    if (!grantAllows(grant, body.scope ?? current.scope)) return memoryDenied(c);
+    if (!grantAllows(grant, body.scope ?? current.scope))
+      return memoryDenied(c);
     const result = await store.supersedeMemory({
       id: c.req.param("id"),
       userId,
@@ -416,10 +424,15 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
-    const body = await c.req.json<{ query: string; limit?: number; scope?: string }>();
+    const body = await c.req.json<{
+      query: string;
+      limit?: number;
+      scope?: string;
+    }>();
     const grant = memoryGrant(c);
     const scope =
-      body.scope ?? (grant && !grantAllows(grant, "project") ? "user" : undefined);
+      body.scope ??
+      (grant && !grantAllows(grant, "project") ? "user" : undefined);
     if (scope && !grantAllows(grant, scope)) return memoryDenied(c);
     const rows = await store.recallMemories(
       userId,
@@ -583,8 +596,7 @@ export function createIntelligenceRestRoutes(
   app.get("/api/v1/learning/containers/:id", async (c) => {
     const rows = await store.listContainers();
     const row = rows.find((container) => container.id === c.req.param("id"));
-    if (!row)
-      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
+    if (!row) return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
     return c.json({ container: containerSummary(row) });
   });
 
@@ -656,8 +668,19 @@ export function createIntelligenceRestRoutes(
       projectId: Number.isInteger(projectId) ? projectId : 1,
     });
     if (outcome === "present")
-      return c.json({ error: { code: "LEARNING_CONTAINER_ALREADY_EXISTS" } }, 409);
-    return c.json({ container: { id: body.id, projectId: Number.isInteger(projectId) ? projectId : 1 } }, 201);
+      return c.json(
+        { error: { code: "LEARNING_CONTAINER_ALREADY_EXISTS" } },
+        409,
+      );
+    return c.json(
+      {
+        container: {
+          id: body.id,
+          projectId: Number.isInteger(projectId) ? projectId : 1,
+        },
+      },
+      201,
+    );
   });
 
   /**
@@ -671,8 +694,7 @@ export function createIntelligenceRestRoutes(
     if (!(await store.containerExists(containerId)))
       return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
     const found = await store.skillRevision(containerId, revision);
-    if (!found)
-      return c.json({ error: { code: "REVISION_NOT_FOUND" } }, 403);
+    if (!found) return c.json({ error: { code: "REVISION_NOT_FOUND" } }, 403);
     const etag = `"${createHash("sha256").update(found.archive).digest("hex")}"`;
     if (c.req.header("if-none-match") === etag)
       return new Response(null, {
@@ -704,9 +726,7 @@ export function createIntelligenceRestRoutes(
     ),
   );
 
-  app.get("/api/v1/learning/containers/:id/runs", (c) =>
-    c.json({ runs: [] }),
-  );
+  app.get("/api/v1/learning/containers/:id/runs", (c) => c.json({ runs: [] }));
 
   app.get("/api/v1/learning/containers/:id/candidates", (c) =>
     c.json({ candidates: [] }),

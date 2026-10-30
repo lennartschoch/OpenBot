@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import type { IntelligenceStore } from "./store";
 import { EventType } from "@ag-ui/core";
+import type { IntelligenceStore } from "./store";
 
 /**
  * The realtime gateway: a Phoenix-protocol WebSocket server speaking the same
@@ -181,7 +181,9 @@ export class IntelligenceGateway {
   ): Promise<void> {
     const code = await this.store.ensureJoinCode(userId);
     const topic =
-      channel === "threads" ? `user_meta:${code}` : `user_meta:memories:${code}`;
+      channel === "threads"
+        ? `user_meta:${code}`
+        : `user_meta:memories:${code}`;
     this.broadcast(topic, event, payload);
   }
 
@@ -256,10 +258,9 @@ export class IntelligenceGateway {
 
     // The runner's ingestion channel negotiates the event-batch capability;
     // every plane answers the join, and replies carry the platform's shape.
-    const response: Record<string, unknown> =
-      topic.startsWith("ingestion:")
-        ? { capabilities: [RUNNER_EVENT_BATCH_CAPABILITY] }
-        : {};
+    const response: Record<string, unknown> = topic.startsWith("ingestion:")
+      ? { capabilities: [RUNNER_EVENT_BATCH_CAPABILITY] }
+      : {};
     reply(ws, joinRef, ref, topic, response);
 
     // A browser thread join replays the events after the caller's cursor, then
@@ -369,18 +370,23 @@ export class IntelligenceGateway {
       }
       if (thread) {
         const latest = await this.store.latestEvent(threadId);
-        await this.broadcastUser(thread.userId, "threads", "thread_run_activity", {
-          thread_id: threadId,
-          threadId,
-          agent_id: thread.agentId,
-          agentId: thread.agentId,
-          run_id: runId,
-          runId,
-          event_type: event.type,
-          eventType: event.type,
-          latest_event_id: latest.cpkiEventId,
-          latestEventId: latest.cpkiEventId,
-        });
+        await this.broadcastUser(
+          thread.userId,
+          "threads",
+          "thread_run_activity",
+          {
+            thread_id: threadId,
+            threadId,
+            agent_id: thread.agentId,
+            agentId: thread.agentId,
+            run_id: runId,
+            runId,
+            event_type: event.type,
+            eventType: event.type,
+            latest_event_id: latest.cpkiEventId,
+            latestEventId: latest.cpkiEventId,
+          },
+        );
       }
     }
     const terminal = stored.some(
@@ -427,14 +433,21 @@ export class IntelligenceGateway {
    * its ingestion channel; the runner stops the agent, and its terminal events
    * come back through the event push.
    */
-  private relayStop(threadTopic: string, payload: Record<string, unknown>): void {
+  private relayStop(
+    threadTopic: string,
+    payload: Record<string, unknown>,
+  ): void {
     const threadId = threadTopic.slice("thread:".length);
-    this.broadcast(`ingestion:${String(payload.run_id ?? payload.runId ?? "")}`, RUNNER_EVENT, {
-      type: "CUSTOM",
-      name: "stop",
-      timestamp: Date.now(),
-      threadId,
-    });
+    this.broadcast(
+      `ingestion:${String(payload.run_id ?? payload.runId ?? "")}`,
+      RUNNER_EVENT,
+      {
+        type: "CUSTOM",
+        name: "stop",
+        timestamp: Date.now(),
+        threadId,
+      },
+    );
   }
 }
 
@@ -467,7 +480,12 @@ function parseFrame(raw: string | Buffer): Frame | null {
   };
 }
 
-function send(ws: GatewaySocket, topic: string, event: string, payload: unknown): void {
+function send(
+  ws: GatewaySocket,
+  topic: string,
+  event: string,
+  payload: unknown,
+): void {
   ws.send(JSON.stringify([null, null, topic, event, payload]));
 }
 
@@ -479,7 +497,13 @@ function reply(
   response: Record<string, unknown>,
 ): void {
   ws.send(
-    JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response }]),
+    JSON.stringify([
+      joinRef,
+      ref,
+      topic,
+      "phx_reply",
+      { status: "ok", response },
+    ]),
   );
 }
 
@@ -491,7 +515,13 @@ function replyError(
   response: Record<string, unknown>,
 ): void {
   ws.send(
-    JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "error", response }]),
+    JSON.stringify([
+      joinRef,
+      ref,
+      topic,
+      "phx_reply",
+      { status: "error", response },
+    ]),
   );
 }
 
@@ -505,7 +535,9 @@ function sameSecret(presented: string | undefined, expected: string): boolean {
 
 const seqOf = (event: Record<string, unknown>): number => {
   const metadata = event.metadata as { cpki_event_seq?: number } | undefined;
-  return typeof metadata?.cpki_event_seq === "number" ? metadata.cpki_event_seq : 0;
+  return typeof metadata?.cpki_event_seq === "number"
+    ? metadata.cpki_event_seq
+    : 0;
 };
 
 const threadIdOf = (event: Record<string, unknown>): string | null => {

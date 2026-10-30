@@ -24,7 +24,12 @@ export function createLocalIntelligence(deps: {
     serviceToken: deps.serviceToken,
     meta: {
       threads: (userId, payload) => {
-        void gateway.broadcastUser(userId, "threads", "thread_metadata", payload);
+        void gateway.broadcastUser(
+          userId,
+          "threads",
+          "thread_metadata",
+          payload,
+        );
       },
       memories: (userId, payload) => {
         void gateway.broadcastUser(

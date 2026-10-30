@@ -35,7 +35,7 @@ In-process pub/sub, no Redis, no multi-replica fan-out, no presence tracking.
 | `PATCH /api/threads/:id/lock` `{runId,ttlSeconds}` (renew), `DELETE` (cleanup) | |
 | `GET /api/threads/:id/join-code?userId`, `POST /api/threads/:id/connect` | `{threadId,joinToken,runId?}` |
 | `POST /api/threads/subscribe` `{userId}` | `{joinToken}` → `user_meta:{joinCode}` Phoenix topic |
-| `GET/POST /api/memories`, `PATCH/DELETE /api/memories/:id`, `POST /api/memories/recall` | `{memories}` / MemorySummary; create absorbs near-dups (`absorbed`), PATCH retires+inserts (`retiredId`); recall scores |
+| `GET/POST /api/memories`, `PATCH/DELETE /api/memories/:id`, `POST /api/memories/recall` | `{memories}` / MemorySummary; create absorbs normalized near-dups (`absorbed`), PATCH retires+inserts (`retiredId`) and keeps the retired row's scope/kind/sources when omitted; recall is lexical and honours `scope` and the `x-cpki-memory-grant` header |
 | `POST /api/memories/subscribe` | `{joinToken, joinCode}` → `user_meta:memories:{joinCode}` |
 | `GET /api/entitlements/runtime` | `{status:"ready", entitlement:{active:true}}` |
 | `GET /api/inspector/metadata`, `/api/_inspect/threads/:id/events\|state` | thin reads over the event log |
@@ -64,14 +64,28 @@ In-process pub/sub, no Redis, no multi-replica fan-out, no presence tracking.
   (`memory_metadata` deltas).
 - `/channels` — live-screen screencast relay (Phase 2).
 
-Replay: on join, stream persisted events after `last_seen_event_id`, then
-`replay_complete {latestEventId}`; if no active run, `stream_idle`.
+Replay: a **connect** join streams persisted events after `last_seen_event_id`, then
+`replay_complete {latestEventId}`; if no lock is active, `stream_idle`. A **run** join replays
+nothing (a historical `RUN_FINISHED` would end the run that is starting). When a terminal event
+releases the lock, connect-mode subscribers get `stream_idle`, and `thread_run_activity` is published
+on the user's meta channel for the thread list.
 
 ## The re-implementation
 
 One new module, `server/src/intelligence-local/`, mounted on the existing Bun server
 (`http-server.ts` already dispatches WS upgrades; Hono serves REST). Zero new processes,
 zero new containers.
+
+### Credentials and ownership
+
+The REST surface is the deployment's platform key (`Authorization: Bearer`), compared exactly. The
+project service token is a second credential accepted for exactly one route — creating a Learning
+container — and authenticates nothing else. Thread routes are scoped to the `userId` that owns the
+thread: another person's thread is a 404, and lock/connect create the thread for the caller on first
+use. The Phoenix planes are separate: the runner and channels planes present the platform key, the
+runner may only join `ingestion:*`, and a client may only join `thread:*`, `trajectory:*` and
+`user_meta:*` with a single-use join token. The user's meta-channel suffix (`joinCode`) is stable,
+and a token names the one code it may join.
 
 ### Tables (drizzle, existing Postgres)
 
@@ -106,4 +120,20 @@ Chrome extension, `@copilotkit/*` npm packages.
    runs/candidates pages; engine later.
 4. **Packaging** — `.env.example`, docker-compose, docs; no external keys beyond a model key.
 
-Fork `lennartschoch/OpenBot`, branch `local-intelligence`.
+## Status
+
+Done: the core REST and Phoenix loop, thread ownership and pagination, stable join codes/single-use
+tokens, connect-only replay and `stream_idle` on finish, merged `RUN_STARTED` transcripts,
+`thread_run_activity`, batched event writes folded under the thread lock, Learning container reads
+and the Skills batch, `learningContainerId` assignment, scoped memory with grants and normalized
+absorption, and an empty Inspector Learning snapshot.
+
+Deliberately not implemented yet: the Learning engine itself (`POST …/runs`, candidate review and
+insight evidence answer unsupported or empty), semantic/hybrid memory recall (the current recall is
+lexical `ts_rank` + substring; the `pgvector` extension is no longer installed by the schema), and
+Trajectory persistence (the `/trajectories/join` token is minted and the `trajectory:` topic relays,
+but events are not stored). Tombstoned thread ids and the hosted error envelope (`message`,
+`category`, `requestId`) are also not reproduced.
+
+The platform lives in `server/src/intelligence/`, is mounted by `server/src/http-server.ts`, and is
+covered by `server/tests/intelligence-platform.integration.test.ts`.

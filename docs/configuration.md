@@ -22,7 +22,7 @@ bash scripts/start.sh
 | `KEY_ENCRYPTION_KEY`          | Base64-encoded 32-byte key for encrypted stored credentials. Generate with `openssl rand -base64 32`. |
 | `INTELLIGENCE_API_URL`        | Intelligence platform API URL. Defaults to this server's own `/api/intelligence`.                     |
 | `INTELLIGENCE_GATEWAY_WS_URL` | Intelligence realtime gateway URL. Defaults to this server's own `/api/intelligence-gateway`.        |
-| `CPK_INTELLIGENCE_API_KEY` | Key the server presents to the platform. Any non-empty value is accepted by the built-in platform. |
+| `CPK_INTELLIGENCE_API_KEY` | Key the server presents to the platform, and the built-in platform compares it exactly. The example value is a laptop placeholder; set a random one on a deployment other people can reach. |
 | `INTELLIGENCE_API_KEY` | Legacy runtime key; used when `CPK_INTELLIGENCE_API_KEY` is empty or absent. |
 
 In this fork the Intelligence platform is built into the server: one process, the same Postgres.
@@ -625,7 +625,7 @@ them, including a saved off. See [automatic-learning.md](automatic-learning.md).
 | `CPK_INTELLIGENCE_LEARNING_CONTAINER_ID` | Default Learning container for this deployment's Bots. 1 to 64 lowercase letters, digits and single hyphens, or the server refuses to start. |
 | `CPK_INTELLIGENCE_SKILLS_REVISION`       | An exact published skills revision to pin. Read only beside a container id. Unset follows the latest. |
 | `OPENBOT_LEARNING_AUTO_ASSIGN`           | `false` or `0` stops the server assigning the project's `openbot` container automatically. On otherwise, and off whenever `CPK_INTELLIGENCE_LEARNING_CONTAINER_ID` is set. |
-| `INTELLIGENCE_SERVICE_TOKEN`             | An Intelligence service token that creates the `openbot` Learning container (local evaluation installs only; see [Creating the container](automatic-learning.md#creating-the-container)). Requires `INTELLIGENCE_PROJECT_ID`. |
+| `INTELLIGENCE_SERVICE_TOKEN`             | An Intelligence service token that creates the `openbot` Learning container (local evaluation installs only; see [Creating the container](automatic-learning.md#creating-the-container)). Requires `INTELLIGENCE_PROJECT_ID`. The built-in platform validates it for that one route and accepts it nowhere else. |
 | `INTELLIGENCE_PROJECT_ID`                | The numeric ID of the runtime key's Intelligence project, where the service token creates the container. Set both or neither, or the server refuses to start. |
 | `OPENBOT_MEMORY_SOURCE_DEFAULTS`         | `false` or `0` stops OpenBot making each app a person connected into a memory source for the Bots they talk to. On otherwise. Existing sources are left as they are. |
 | `OPENBOT_PROACTIVE_DEFAULTS`             | `false` or `0` stops OpenBot switching on background research for the Bots a person talks to. On otherwise. Existing settings are left as they are. |
