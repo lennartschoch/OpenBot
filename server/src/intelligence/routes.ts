@@ -30,6 +30,23 @@ export type IntelligenceRestDependencies = {
   };
 };
 
+/**
+ * A body field the platform promises, or the request is a 400.
+ *
+ * Every route here is called by the runtime, which sends complete bodies — but a
+ * missing field reached Postgres and came back as a 500 with a driver stack, which
+ * reads as a broken server rather than a broken caller.
+ */
+const text = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+const badRequest = (c: { json: (body: unknown, status: 400) => Response }) =>
+  c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
+
+/** A handle minted by `gen_random_uuid()`; anything else cannot name a stored file. */
+const isUuid = (value: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
 /** The `thread_metadata` delta shape the client thread store applies. */
 const threadDelta = (
   operation: "created" | "updated" | "archived" | "deleted",
@@ -110,14 +127,20 @@ export function createIntelligenceRestRoutes(
   });
 
   app.post("/api/threads", async (c) => {
-    const body = await c.req.json<{
-      threadId: string;
-      userId: string;
-      agentId: string;
-      name?: string;
-      learningContainerId?: string;
-    }>();
-    const existing = await store.getThread(body.threadId);
+    const body = await c.req
+      .json<{
+        threadId: string;
+        userId: string;
+        agentId: string;
+        name?: string;
+        learningContainerId?: string;
+      }>()
+      .catch(() => null);
+    const threadId = text(body?.threadId);
+    const userId = text(body?.userId);
+    const agentId = text(body?.agentId);
+    if (!body || !threadId || !userId || !agentId) return badRequest(c);
+    const existing = await store.getThread(threadId);
     if (existing)
       return c.json({ error: { code: "CONFLICT", retryable: false } }, 409);
     if (
@@ -129,11 +152,16 @@ export function createIntelligenceRestRoutes(
         404,
       );
     }
-    const row = await store.createThread(body);
+    const row = await store.createThread({
+      ...body,
+      threadId,
+      userId,
+      agentId,
+    });
     const thread = row ? summary(row) : null;
     if (!thread)
       return c.json({ error: { code: "CREATE_FAILED", retryable: true } }, 500);
-    deps.meta?.threads(body.userId, threadDelta("created", thread as never));
+    deps.meta?.threads(userId, threadDelta("created", thread as never));
     return c.json({ thread }, 201);
   });
 
@@ -327,8 +355,10 @@ export function createIntelligenceRestRoutes(
   });
 
   app.post("/api/threads/subscribe", async (c) => {
-    const body = await c.req.json<{ userId: string }>();
-    const joinToken = await store.mintToken("user_threads", body.userId);
+    const body = await c.req.json<{ userId?: string }>().catch(() => null);
+    const userId = text(body?.userId);
+    if (!userId) return badRequest(c);
+    const joinToken = await store.mintToken("user_threads", userId);
     return c.json({ joinToken });
   });
 
@@ -353,17 +383,21 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
-    const body = await c.req.json<{
-      content: string;
-      kind: string;
-      scope?: string;
-      sourceThreadIds?: string[];
-    }>();
+    const body = await c.req
+      .json<{
+        content: string;
+        kind: string;
+        scope?: string;
+        sourceThreadIds?: string[];
+      }>()
+      .catch(() => null);
+    const content = text(body?.content);
+    if (!body || !content) return badRequest(c);
     const scope = body.scope ?? "user";
     if (!grantAllows(memoryGrant(c), scope)) return memoryDenied(c);
     const { row, absorbed } = await store.createMemory({
       userId,
-      content: body.content,
+      content,
       kind: body.kind,
       scope,
       sourceThreadIds: body.sourceThreadIds ?? [],
@@ -376,12 +410,15 @@ export function createIntelligenceRestRoutes(
     const userId = requireUser(c);
     if (!userId)
       return c.json({ error: { code: "BAD_REQUEST", retryable: false } }, 400);
-    const body = await c.req.json<{
-      content: string;
-      kind: string;
-      scope?: string;
-      sourceThreadIds?: string[];
-    }>();
+    const body = await c.req
+      .json<{
+        content: string;
+        kind: string;
+        scope?: string;
+        sourceThreadIds?: string[];
+      }>()
+      .catch(() => null);
+    if (!body || !text(body.content)) return badRequest(c);
     const current = await store.getMemory(c.req.param("id"), userId);
     if (!current) return notFound(c);
     const grant = memoryGrant(c);
@@ -533,19 +570,24 @@ export function createIntelligenceRestRoutes(
 
   /** Mint a Trajectory capture join; the browser streams on `trajectory:{id}`. */
   app.post("/api/trajectories/join", async (c) => {
-    const body = await c.req.json<{
-      trajectoryId: string;
-      appUserId?: string;
-    }>();
-    const joinToken = await store.joinTrajectory(body.trajectoryId);
-    return c.json({ joinToken, trajectoryId: body.trajectoryId });
+    const body = await c.req
+      .json<{ trajectoryId?: string; appUserId?: string }>()
+      .catch(() => null);
+    const trajectoryId = text(body?.trajectoryId);
+    if (!trajectoryId) return badRequest(c);
+    const joinToken = await store.joinTrajectory(trajectoryId);
+    return c.json({ joinToken, trajectoryId });
   });
 
   // ---- managed-channel files (Phase 2) -------------------------------------
 
   /** One stored asset, for history hydration (`ɵgetManagedChannelAsset`). */
   app.get("/api/channels/files/:assetId", async (c) => {
-    const file = await store.getChannelFile(c.req.param("assetId"));
+    const handle = c.req.param("assetId");
+    // The column is a uuid, so a malformed id has to be answered here rather than
+    // sent to Postgres, where it came back as an unhandled 500 instead of "absent".
+    if (!isUuid(handle)) return c.body(null, 404);
+    const file = await store.getChannelFile(handle);
     if (!file) return c.body(null, 404);
     return new Response(new Uint8Array(file.bytes), {
       headers: { "content-type": file.mimeType },
@@ -716,6 +758,10 @@ export function createIntelligenceRestRoutes(
       containerId: c.req.param("id"),
       archive: Buffer.from(await c.req.arrayBuffer()),
     });
+    // Publishing into a container nobody created used to store an archive the read
+    // route then refused, so the revision was silently unreachable.
+    if (!revision)
+      return c.json({ error: { code: "CONTAINER_NOT_FOUND" } }, 404);
     return c.json({ revision });
   });
 

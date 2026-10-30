@@ -354,13 +354,23 @@ export class IntelligenceGateway {
       payload: event,
       seq: seqOf(event),
     }));
-    let stored: Record<string, unknown>[];
+    let stored: Record<string, unknown>[] | null;
     try {
-      stored = (await this.store.appendEvents(threadId, runId, stamped)).events;
+      stored = await this.store.appendEvents(threadId, runId, stamped);
     } catch {
       // A store failure is the runner's to handle: the push goes un-acked, and
       // its durability contract replays the batch (idempotent on (run_id, seq)).
       replyError(ws, joinRef, ref, ingestionTopic, { reason: "store_failed" });
+      return;
+    }
+    if (!stored) {
+      // The run names a thread that does not exist — a lock or connect creates one
+      // first, so this is a caller that skipped a step. Refusing it is the only
+      // answer that is not a lie: acking would call the batch durable where nothing
+      // reads it back.
+      replyError(ws, joinRef, ref, ingestionTopic, {
+        reason: "thread_not_found",
+      });
       return;
     }
     // The hosted platform echoes every accepted push back on the ingestion

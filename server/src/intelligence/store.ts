@@ -295,18 +295,24 @@ export class IntelligenceStore {
   // ---- events and messages ------------------------------------------------
 
   /**
-   * One appended batch, ordered by its per-run seq.
+   * One appended batch, ordered by its per-run seq. `null` when the thread is not
+   * there.
    *
    * The runner retries event pushes; the insert is idempotent on `(run_id, seq)`
    * so a replayed batch stores each event once. The batch and the transcript it
    * folds into are one transaction, and the thread row is locked first, so two
    * batches cannot read the same messages and write over each other.
+   *
+   * A missing thread is refused rather than written to: nothing enforces the
+   * reference at the database level, so an acked batch for a thread nobody created
+   * was stored where no transcript, no replay and no Inspector would ever read it —
+   * a durable-looking write that was not durable for anybody.
    */
   async appendEvents(
     threadId: string,
     runId: string,
     events: { seq: number; payload: Record<string, unknown> }[],
-  ): Promise<{ ids: Map<number, string>; events: Record<string, unknown>[] }> {
+  ): Promise<Record<string, unknown>[] | null> {
     const sorted = [...events].sort((a, b) => a.seq - b.seq);
     return this.db.transaction(async (tx) => {
       const [thread] = await tx
@@ -315,6 +321,7 @@ export class IntelligenceStore {
         .where(eq(intelligenceThreads.id, threadId))
         .for("update")
         .limit(1);
+      if (!thread) return null;
       const inserted =
         sorted.length === 0
           ? []
@@ -337,7 +344,7 @@ export class IntelligenceStore {
       const stored = [...inserted]
         .sort((a, b) => a.seq - b.seq)
         .map((row) => row.event as Record<string, unknown>);
-      if (stored.length > 0 && thread) {
+      if (stored.length > 0) {
         const messages = foldEventsToMessages(
           (thread.messages ?? []) as never,
           stored as never,
@@ -352,10 +359,7 @@ export class IntelligenceStore {
           })
           .where(eq(intelligenceThreads.id, threadId));
       }
-      return {
-        ids: new Map(inserted.map((row) => [row.seq, String(row.id)])),
-        events: stored,
-      };
+      return stored;
     });
   }
 
@@ -991,7 +995,10 @@ export class IntelligenceStore {
   async publishSkillRevision(input: {
     containerId: string;
     archive: Buffer;
-  }): Promise<string> {
+  }): Promise<string | null> {
+    // The revision row has no foreign key to its container, so a publish for a
+    // container nobody created used to store an archive that no read could reach.
+    if (!(await this.containerExists(input.containerId))) return null;
     const revision =
       readArchiveRevision(input.archive) ??
       createHash("sha256").update(input.archive).digest("hex");

@@ -1652,6 +1652,133 @@ describe("long-thread replay and inspector pages", () => {
   });
 });
 
+describe("requests the platform refuses rather than failing on", () => {
+  let app: ReturnType<typeof intelligence>;
+  beforeAll(() => (app = intelligence()));
+
+  /*
+   * The runtime sends complete bodies, so these are for the caller that is not the
+   * runtime: a missing field used to reach Postgres and come back as a 500 with a
+   * driver stack attached, which reads as a broken server rather than a broken call.
+   */
+  test.each([
+    ["/api/threads", JSON.stringify({ userId: "u1", agentId: "a1" })],
+    ["/api/threads", JSON.stringify({ threadId: "t", agentId: "a1" })],
+    ["/api/threads", JSON.stringify({ threadId: "t", userId: "u1" })],
+    ["/api/threads", "{}"],
+    ["/api/threads/subscribe", "{}"],
+    ["/api/trajectories/join", "{}"],
+  ])("%s with an incomplete body is a 400: %s", async (path, body) => {
+    const result = await call(app, path, { method: "POST", body });
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe("BAD_REQUEST");
+  });
+
+  test("a memory without content is a 400 on create and on patch", async () => {
+    const headers = { "x-cpki-user-id": `boundary-${unique()}` };
+    const created = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "topical" }),
+    });
+    expect(created.status).toBe(400);
+
+    const live = await call(app, "/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "keep this one", kind: "topical" }),
+    });
+    expect(live.status).toBe(200);
+
+    const patched = await call(app, `/api/memories/${live.body.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ kind: "topical" }),
+    });
+    expect(patched.status).toBe(400);
+  });
+
+  // Body that is not JSON at all: `c.req.json()` threw, so this was a 500 too.
+  test("a body that is not JSON is a 400", async () => {
+    const result = await call(app, "/api/threads", {
+      method: "POST",
+      body: "not json",
+    });
+    expect(result.status).toBe(400);
+  });
+
+  // The handle column is a uuid, so a malformed id has to be answered here instead of
+  // being sent to Postgres, where it came back as an unhandled 500.
+  test("a malformed channel-file id is a 404, not a database error", async () => {
+    const result = await app.rest.request("/api/channels/files/not-a-uuid", {
+      headers: { authorization: `Bearer ${API_KEY}` },
+    });
+    expect(result.status).toBe(404);
+  });
+
+  test("publishing skills into a container that does not exist is a 404", async () => {
+    const published = await call(
+      app,
+      "/api/v1/learning/containers/ghost/skills",
+      { method: "PUT", body: "zip-bytes" },
+    );
+    expect(published.status).toBe(404);
+    expect(published.body.error.code).toBe("CONTAINER_NOT_FOUND");
+
+    // And nothing was left behind for a later read to find.
+    const read = await call(app, "/api/v1/learning/containers/ghost/skills");
+    expect(read.status).toBe(404);
+  });
+
+  // A runner push naming a thread nobody created: acked, it was a durable write to
+  // rows no transcript, replay or Inspector reads back.
+  test("an event batch for a thread that does not exist is refused, not acked", async () => {
+    const runner = captureSocket({ phoenix: "runner" });
+    const runId = `run-${unique()}`;
+    const missing = `absent-${unique()}`;
+    app.gateway.handle(
+      runner,
+      JSON.stringify([
+        null,
+        "1",
+        `ingestion:${runId}`,
+        "phx_join",
+        { thread_id: missing, run_id: runId },
+      ]),
+    );
+    app.gateway.handle(
+      runner,
+      JSON.stringify([
+        null,
+        "2",
+        `ingestion:${runId}`,
+        "events",
+        {
+          events: [
+            {
+              type: "RUN_STARTED",
+              threadId: missing,
+              runId,
+              metadata: { cpki_event_id: "x1", cpki_event_seq: 1 },
+            },
+          ],
+        },
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const replies = runner.frames
+      .map((frame) => JSON.parse(frame) as Frame<ReplyPayload>)
+      .filter((frame) => frame[3] === "phx_reply");
+    expect(replies.at(-1)?.[4].status).toBe("error");
+    expect(replies.at(-1)?.[4].response.reason).toBe("thread_not_found");
+    expect(
+      (await call(app, `/api/_inspect/threads/${missing}/events`)).body.events
+        .length,
+    ).toBe(0);
+  });
+});
+
 describe("memory scope, grants and absorption", () => {
   let app: ReturnType<typeof intelligence>;
   beforeAll(() => (app = intelligence()));
@@ -1889,9 +2016,10 @@ describe("event batch writes", () => {
       },
     }));
     const first = await app.store.appendEvents(threadId, runId, events);
-    expect(first.events.length).toBe(50);
+    expect(first?.length).toBe(50);
+    // Idempotent on (run_id, seq): the second push stores nothing, and says so.
     const replay = await app.store.appendEvents(threadId, runId, events);
-    expect(replay.events.length).toBe(0);
+    expect(replay?.length).toBe(0);
     const inspect = await call(app, `/api/_inspect/threads/${threadId}/events`);
     expect(inspect.body.events.length).toBe(50);
   });
